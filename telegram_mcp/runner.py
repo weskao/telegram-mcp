@@ -60,6 +60,7 @@ async def _main() -> None:
 
 def main() -> None:
     _configure_allowed_roots_from_cli(sys.argv[1:])
+    _apply_tool_disable_list()
     nest_asyncio.apply()
     asyncio.run(_main())
 

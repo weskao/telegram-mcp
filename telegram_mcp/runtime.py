@@ -1095,5 +1095,63 @@ def _configure_allowed_roots_from_cli(argv: Optional[List[str]] = None) -> None:
     SERVER_ALLOWED_ROOTS = _dedupe_paths(resolved_roots)
 
 
+# ---------------------------------------------------------------------------
+# Tool access control
+# ---------------------------------------------------------------------------
+
+# Tools that are destructive or high-risk — disabled by default.
+_DANGEROUS_TOOLS: frozenset[str] = frozenset(
+    {
+        "delete_message",
+        "delete_chat_history",
+        "delete_messages_bulk",
+        "delete_scheduled_message",
+        "delete_folder",
+        "delete_contact",
+        "delete_profile_photo",
+        "delete_chat_photo",
+        "ban_user",
+        "promote_admin",
+        "demote_admin",
+        "create_group",
+        "create_channel",
+        "export_contacts",
+        "export_chat_invite",
+    }
+)
+
+
+def _apply_tool_disable_list() -> None:
+    """Remove disabled tools from the MCP registry.
+
+    Dangerous tools are disabled by default.  Set TELEGRAM_ENABLE_DANGEROUS_TOOLS=1
+    to allow them.  Use TELEGRAM_DISABLE_TOOLS (comma-separated tool names) to
+    additionally disable specific non-dangerous tools.
+
+    Must be called after all tool modules have been imported so that @mcp.tool()
+    decorators have already registered every tool.
+    """
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    to_disable: set[str] = set()
+
+    if not _parse_bool_env(os.getenv("TELEGRAM_ENABLE_DANGEROUS_TOOLS"), default=False):
+        to_disable.update(_DANGEROUS_TOOLS)
+
+    raw = os.getenv("TELEGRAM_DISABLE_TOOLS", "").strip()
+    for name in (n.strip() for n in raw.split(",") if n.strip()):
+        to_disable.add(name)
+
+    for tool_name in sorted(to_disable):
+        try:
+            mcp._tool_manager.remove_tool(tool_name)
+            print(f"[telegram-mcp] Tool disabled: {tool_name}", file=sys.stderr)
+        except ToolError:
+            print(
+                f"[telegram-mcp] Warning: cannot disable unknown tool '{tool_name}'",
+                file=sys.stderr,
+            )
+
+
 # Re-export shared runtime names for tool modules that use star imports.
 __all__ = [name for name in globals() if not name.startswith("__")]
