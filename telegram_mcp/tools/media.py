@@ -3,6 +3,97 @@
 from telegram_mcp.runtime import *
 
 
+# File-extension safety filter for download_media.
+# External Telegram attachments are untrusted input; only allow types that
+# Telegram natively delivers across iOS / Android / macOS / Windows clients.
+# Telethon detects the real extension from file content (see download_media
+# below where the caller-supplied suffix is stripped), so this check is
+# content-based, not filename-based.
+#
+# Defaults can be fully overridden at startup via env vars:
+#   TELEGRAM_DOWNLOAD_ALLOWED_EXT="jpg,jpeg,png,..."
+#   TELEGRAM_DOWNLOAD_BLOCKED_EXT="exe,msi,..."
+# When an env var is set (non-empty), it REPLACES the corresponding default
+# list. Leading dots are stripped, entries are lowercased and de-duped.
+_DEFAULT_DOWNLOAD_ALLOWED_EXT = frozenset({
+    # images (Photo / Sticker / iOS HEIC original)
+    "jpg", "jpeg", "png", "webp", "heic", "heif", "gif",
+    # video (Video / Animation / Video sticker)
+    "mp4", "mov", "webm",
+    # audio (Audio / Voice)
+    "mp3", "m4a", "ogg",
+    # documents
+    "pdf", "txt", "md", "csv",
+    # office (macro-free; .docm / .xlsm / .pptm are blocked)
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+})
+_DEFAULT_DOWNLOAD_BLOCKED_EXT = frozenset({
+    # executables
+    "exe", "msi", "bat", "cmd", "sh", "bash", "zsh", "ps1", "vbs", "vbe",
+    "js", "jse", "wsf", "wsh", "scr", "com", "pif", "cpl", "reg",
+    "app", "dmg", "pkg", "mpkg", "deb", "rpm", "apk", "ipa",
+    "appimage", "run", "bin",
+    # code / scripts
+    "mjs", "cjs", "py", "pyc", "pyo", "rb", "pl", "php", "phtml",
+    "jar", "war", "ear", "class", "lua", "tcl",
+    # macro-enabled office
+    "docm", "xlsm", "pptm", "dotm", "xltm", "potm",
+    # script-embeddable / renderable
+    "svg", "html", "htm", "xhtml", "xml", "xsl", "xslt", "mht", "mhtml",
+    # shortcuts / containers (can dereference to executables)
+    "lnk", "url", "desktop", "webloc", "inf", "iso", "vhd", "vhdx",
+    # archives (may hide any of the above)
+    "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz",
+    "cab", "ace", "arj", "lzh",
+})
+
+
+def _parse_ext_env(var_name: str, default: frozenset) -> frozenset:
+    raw = os.environ.get(var_name, "").strip()
+    if not raw:
+        return default
+    parsed = {
+        token.strip().lower().lstrip(".")
+        for token in raw.split(",")
+        if token.strip()
+    }
+    return frozenset(parsed)
+
+
+_DOWNLOAD_ALLOWED_EXT = _parse_ext_env(
+    "TELEGRAM_DOWNLOAD_ALLOWED_EXT", _DEFAULT_DOWNLOAD_ALLOWED_EXT
+)
+_DOWNLOAD_BLOCKED_EXT = _parse_ext_env(
+    "TELEGRAM_DOWNLOAD_BLOCKED_EXT", _DEFAULT_DOWNLOAD_BLOCKED_EXT
+)
+
+
+def _check_download_extension(path: Path) -> Optional[str]:
+    """Validate a freshly-downloaded file's extension.
+
+    Returns an error message string if the file must be rejected, or None
+    if it is safe. Caller is responsible for deleting the file on rejection.
+    """
+    name = path.name
+    # double-extension trap: foo.pdf.exe -> classify as the *last* suffix
+    parts = name.lower().rsplit(".", 2)
+    if len(parts) >= 3 and parts[-2] and parts[-1]:
+        ext = parts[-1]
+        if ext in _DOWNLOAD_BLOCKED_EXT or ext not in _DOWNLOAD_ALLOWED_EXT:
+            return (
+                f"Download blocked: suspicious double-extension '.{parts[-2]}.{ext}' "
+                f"in '{name}'."
+            )
+    ext = path.suffix.lower().lstrip(".")
+    if not ext:
+        return f"Download blocked: file '{name}' has no extension."
+    if ext in _DOWNLOAD_BLOCKED_EXT:
+        return f"Download blocked: extension '.{ext}' is on the blocklist."
+    if ext not in _DOWNLOAD_ALLOWED_EXT:
+        return f"Download blocked: extension '.{ext}' is not on the allowlist."
+    return None
+
+
 @mcp.tool(annotations=ToolAnnotations(title="Send File", openWorldHint=True, destructiveHint=True))
 @with_account(readonly=False)
 @validate_id("chat_id")
@@ -90,6 +181,11 @@ async def download_media(
             return roots_error
         if not _path_is_within_any_root(final_path, roots):
             return "Download failed: resulting path is outside allowed roots."
+
+        ext_error = _check_download_extension(final_path)
+        if ext_error:
+            final_path.unlink(missing_ok=True)
+            return ext_error
 
         return f"Media downloaded to {final_path}."
     except Exception as e:
