@@ -39,7 +39,7 @@ _DEFAULT_DOWNLOAD_BLOCKED_EXT = frozenset({
     # macro-enabled office
     "docm", "xlsm", "pptm", "dotm", "xltm", "potm",
     # script-embeddable / renderable
-    "svg", "html", "htm", "xhtml", "xml", "xsl", "xslt", "mht", "mhtml",
+    "svg", "html", "htm", "xhtml", "xsl", "xslt", "mht", "mhtml",
     # shortcuts / containers (can dereference to executables)
     "lnk", "url", "desktop", "webloc", "inf", "iso", "vhd", "vhdx",
     # archives (may hide any of the above)

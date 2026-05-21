@@ -54,7 +54,7 @@ def test_allowed_extensions_pass(name):
         "macro.xlsm",
         "embed.svg",
         "page.html",
-        "config.xml",
+        "config.xsl",
         "archive.zip",
         "bundle.rar",
         "code.py",
@@ -71,10 +71,11 @@ def test_blocked_extensions_rejected(name):
     "name",
     [
         "weird.xyz",
-        "old.aac",  # not on either list — defaults to reject
+        "old.aac",
         "audio.flac",
         "video.mkv",
         "image.bmp",
+        "layout.xml",
     ],
 )
 def test_unknown_extensions_rejected(name):
