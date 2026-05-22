@@ -136,16 +136,23 @@ export TELEGRAM_SESSION_STRING=$(security find-generic-password -a "$USER" -s te
 - `create_group`、`create_channel`
 - `export_contacts`、`export_chat_invite`
 
-**只需要刪除單則訊息時**，建議精確控制（避免全開），在 `.mcp.json` 的 `env` 區塊加入：
+**只需要刪除單則訊息時**，在 `.mcp.json` 的 `env` 區塊精確開放：
 
 ```json
-"TELEGRAM_ENABLE_DANGEROUS_TOOLS": "1",
-"TELEGRAM_DISABLE_TOOLS": "delete_chat_history,delete_messages_bulk,ban_user,promote_admin,demote_admin,create_group,create_channel,export_contacts,export_chat_invite,delete_scheduled_message,delete_folder,delete_contact,delete_profile_photo,delete_chat_photo"
+"TELEGRAM_ENABLE_TOOLS": "delete_message"
 ```
 
-這樣只有 `delete_message` 被開放，其他危險工具仍然封鎖。
+這樣只有 `delete_message` 被開放，其他危險工具仍然封鎖。需要再開其他工具就用逗號分隔，例如 `"delete_message,delete_messages_bulk"`。
 
-> 操作完後建議移除這兩行並重啟 MCP server。
+如果還想把平時可用的工具（例如 `send_message`、`forward_message`）也一起鎖起來，加上 `TELEGRAM_DISABLE_TOOLS`：
+
+```json
+"TELEGRAM_DISABLE_TOOLS": "send_message,forward_message,edit_message,block_user"
+```
+
+衝突規則：同時出現在兩個變數中時，**DISABLE 優先**。
+
+> 操作完後建議移除這幾行並重啟 MCP server。
 
 ---
 
@@ -175,7 +182,17 @@ security add-generic-password -a "$USER" -s telegram-session-string -w "新的se
 ```
 
 **Q: 可以在多台電腦使用同一個 session string 嗎？**
-A: 可以，但 Telegram 有連線數限制。建議每台電腦產生獨立的 session，避免互相踢掉線。
+A: **不行**。Telegram MTProto 的 session string 綁定到單一連線 — 兩台電腦同時使用同一個 session，Telegram 會立即撤銷它，兩邊都斷線。
+
+憑證共用規則如下：
+
+| 憑證                       | 兩台共用？        |
+| -------------------------- | ----------------- |
+| `telegram-api-id`          | ✅ 可以共用       |
+| `telegram-api-hash`        | ✅ 可以共用       |
+| `telegram-session-string`  | ❌ 每台要各自產生 |
+
+每台電腦各自執行步驟三，產生獨立的 session string，分別存入各自機器的 Keychain。
 
 **Q: MCP server 啟動後看到 `Tool disabled: delete_message` 的訊息？**
 A: 這是正常行為，代表危險工具保護機制正在運作。若需要啟用，參考上方「關於危險工具」章節。
