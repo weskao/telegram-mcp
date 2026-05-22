@@ -1128,23 +1128,39 @@ _DANGEROUS_TOOLS: frozenset[str] = frozenset(
 def _apply_tool_disable_list() -> None:
     """Remove disabled tools from the MCP registry.
 
-    Dangerous tools are disabled by default.  Set TELEGRAM_ENABLE_DANGEROUS_TOOLS=1
-    to allow them.  Use TELEGRAM_DISABLE_TOOLS (comma-separated tool names) to
-    additionally disable specific non-dangerous tools.
+    The default blocklist (``_DANGEROUS_TOOLS``) covers destructive and high-risk
+    tools — they are hidden from the MCP client unless explicitly re-enabled.
+
+    Two comma-separated env vars adjust the effective blocklist:
+
+    - ``TELEGRAM_ENABLE_TOOLS``: subtract from the default blocklist
+      (e.g. re-enable only ``delete_message`` without unlocking the rest).
+    - ``TELEGRAM_DISABLE_TOOLS``: add to the blocklist (e.g. disable routine
+      writes like ``send_message`` for a near read-only posture).
+
+    Conflict rule: a tool listed in both vars stays DISABLED.
 
     Must be called after all tool modules have been imported so that @mcp.tool()
     decorators have already registered every tool.
     """
     from mcp.server.fastmcp.exceptions import ToolError
 
-    to_disable: set[str] = set()
+    def _parse_list(name: str) -> set[str]:
+        raw = os.getenv(name, "").strip()
+        return {n.strip() for n in raw.split(",") if n.strip()}
 
-    if not _parse_bool_env(os.getenv("TELEGRAM_ENABLE_DANGEROUS_TOOLS"), default=False):
-        to_disable.update(_DANGEROUS_TOOLS)
+    enable_set = _parse_list("TELEGRAM_ENABLE_TOOLS")
+    disable_set = _parse_list("TELEGRAM_DISABLE_TOOLS")
 
-    raw = os.getenv("TELEGRAM_DISABLE_TOOLS", "").strip()
-    for name in (n.strip() for n in raw.split(",") if n.strip()):
-        to_disable.add(name)
+    unknown_enables = enable_set - _DANGEROUS_TOOLS
+    if unknown_enables:
+        print(
+            "[telegram-mcp] Warning: TELEGRAM_ENABLE_TOOLS lists tools not in the "
+            f"default blocklist (no effect): {', '.join(sorted(unknown_enables))}",
+            file=sys.stderr,
+        )
+
+    to_disable = (_DANGEROUS_TOOLS - enable_set) | disable_set
 
     for tool_name in sorted(to_disable):
         try:
