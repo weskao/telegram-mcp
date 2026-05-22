@@ -1113,10 +1113,14 @@ _DANGEROUS_TOOLS: frozenset[str] = frozenset(
         "ban_user",
         "promote_admin",
         "demote_admin",
+        "edit_admin_rights",
         "create_group",
         "create_channel",
         "export_contacts",
         "export_chat_invite",
+        "import_contacts",
+        "set_privacy_settings",
+        "leave_chat",
     }
 )
 
