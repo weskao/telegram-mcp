@@ -21,8 +21,15 @@ _keychain_get() {
 : "${TELEGRAM_API_ID:=$(_keychain_get telegram-api-id)}"
 : "${TELEGRAM_API_HASH:=$(_keychain_get telegram-api-hash)}"
 : "${TELEGRAM_SESSION_STRING:=$(_keychain_get telegram-session-string)}"
+: "${TELEGRAM_MCP_TOKEN:=$(_keychain_get telegram-mcp-token)}"
 
-export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_STRING
+if [[ -z "$TELEGRAM_MCP_TOKEN" ]]; then
+  TELEGRAM_MCP_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+  security add-generic-password -a "$USER" -s telegram-mcp-token -w "$TELEGRAM_MCP_TOKEN"
+  echo "[telegram-mcp] Generated and stored new SSE token in Keychain" >&2
+fi
+
+export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_STRING TELEGRAM_MCP_TOKEN
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec uv --directory "$SCRIPT_DIR/.." run telegram-mcp "$@"

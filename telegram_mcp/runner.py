@@ -1,5 +1,7 @@
 """Application entrypoints for the Telegram MCP server."""
 
+import os
+
 from telegram_mcp.install_guard import UnsafeInstallationError, assert_safe_distribution
 
 try:
@@ -39,8 +41,23 @@ async def _main() -> None:
         await asyncio.gather(*(cl.get_dialogs() for cl in clients.values()))
 
         print(f"Telegram client(s) started ({labels}). Running MCP server...", file=sys.stderr)
-        # Use the asynchronous entrypoint instead of mcp.run()
-        await mcp.run_stdio_async()
+        if _transport == "sse":
+            token = os.getenv("TELEGRAM_MCP_TOKEN", "")
+            if not token:
+                print(
+                    "[telegram-mcp] WARNING: TELEGRAM_MCP_TOKEN not set — SSE running without auth",
+                    file=sys.stderr,
+                )
+            import uvicorn
+
+            app = mcp.sse_app()
+            if token:
+                app = BearerTokenMiddleware(app, token)
+            config = uvicorn.Config(app, host="127.0.0.1", port=_sse_port, log_level="warning")
+            server = uvicorn.Server(config)
+            await server.serve()
+        else:
+            await mcp.run_stdio_async()
     except Exception as e:
         print(f"Error starting client: {e}", file=sys.stderr)
         if isinstance(e, sqlite3.OperationalError) and "database is locked" in str(e):
@@ -61,7 +78,8 @@ async def _main() -> None:
 def main() -> None:
     _configure_allowed_roots_from_cli(sys.argv[1:])
     _apply_tool_disable_list()
-    nest_asyncio.apply()
+    if _transport == "stdio":
+        nest_asyncio.apply()
     asyncio.run(_main())
 
 
