@@ -44,7 +44,10 @@ from telethon.tl.types import (
 import re
 from functools import wraps
 import telethon.errors.rpcerrorlist
-from sanitize import sanitize_user_content, sanitize_name, sanitize_dict, format_tool_result
+from sanitize import sanitize_user_content, sanitize_name, sanitize_dict, format_tool_result, format_date
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
 
 
 class ValidationError(Exception):
@@ -56,7 +59,7 @@ class ValidationError(Exception):
 def json_serializer(obj):
     """Helper function to convert non-serializable objects for JSON serialization."""
     if isinstance(obj, datetime):
-        return obj.isoformat()
+        return format_date(obj)
     if isinstance(obj, bytes):
         return obj.decode("utf-8", errors="replace")
     # Add other non-serializable types as needed
@@ -103,6 +106,22 @@ TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID"))
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 
 mcp = FastMCP("telegram")
+
+_transport: str = "stdio"
+_sse_port: int = 8306
+
+
+class BearerTokenMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, token: str):
+        super().__init__(app)
+        self._token = token
+
+    async def dispatch(self, request: Request, call_next):
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[7:] != self._token:
+            return Response("Unauthorized", status_code=401)
+        return await call_next(request)
+
 
 # Annotate all tool results with audience=["user"] so MCP clients know
 # the content is user-generated data, not instructions for the model.
@@ -352,6 +371,7 @@ def with_account(readonly=False):
 
 
 _last_conn_verified: dict[int, float] = {}
+_reconnect_locks: dict[int, asyncio.Lock] = {}
 _CONN_VERIFY_INTERVAL: float = 30.0  # seconds between live pings
 
 
@@ -385,25 +405,28 @@ async def ensure_connected(cl: TelegramClient = None):
         cl = get_client()
 
     key = id(cl)
+    if key not in _reconnect_locks:
+        _reconnect_locks[key] = asyncio.Lock()
 
-    if not cl.is_connected():
-        await _force_reconnect(cl)
-        return
+    async with _reconnect_locks[key]:
+        if not cl.is_connected():
+            await _force_reconnect(cl)
+            return
 
-    # Skip verification if recently confirmed alive
-    now = time.time()
-    if now - _last_conn_verified.get(key, 0.0) < _CONN_VERIFY_INTERVAL:
-        return
+        # Skip verification if recently confirmed alive
+        now = time.time()
+        if now - _last_conn_verified.get(key, 0.0) < _CONN_VERIFY_INTERVAL:
+            return
 
-    # Verify with a lightweight Telegram API call
-    try:
-        await asyncio.wait_for(
-            cl(functions.help.GetNearestDcRequest()),
-            timeout=5.0,
-        )
-        _last_conn_verified[key] = now
-    except (ConnectionError, OSError, asyncio.TimeoutError, Exception):
-        await _force_reconnect(cl)
+        # Verify with a lightweight Telegram API call
+        try:
+            await asyncio.wait_for(
+                cl(functions.help.GetNearestDcRequest()),
+                timeout=5.0,
+            )
+            _last_conn_verified[key] = now
+        except (ConnectionError, OSError, asyncio.TimeoutError, Exception):
+            await _force_reconnect(cl)
 
 
 # Setup robust logging with both file and console output
@@ -1081,6 +1104,8 @@ def _configure_allowed_roots_from_cli(argv: Optional[List[str]] = None) -> None:
         ),
     )
     parser.add_argument("allowed_roots", nargs="*")
+    parser.add_argument("--transport", choices=["stdio", "sse"], default="stdio")
+    parser.add_argument("--port", type=int, default=8306)
     parsed, _unknown = parser.parse_known_args(argv or [])
 
     resolved_roots: List[Path] = []
@@ -1091,8 +1116,10 @@ def _configure_allowed_roots_from_cli(argv: Optional[List[str]] = None) -> None:
         resolved = root.resolve(strict=True)
         resolved_roots.append(resolved)
 
-    global SERVER_ALLOWED_ROOTS
+    global SERVER_ALLOWED_ROOTS, _transport, _sse_port
     SERVER_ALLOWED_ROOTS = _dedupe_paths(resolved_roots)
+    _transport = parsed.transport
+    _sse_port = parsed.port
 
 
 # ---------------------------------------------------------------------------
@@ -1133,9 +1160,9 @@ def _apply_tool_disable_list() -> None:
 
     Two comma-separated env vars adjust the effective blocklist:
 
-    - ``TELEGRAM_ENABLE_TOOLS``: subtract from the default blocklist
+    - ``TELEGRAM_EXTRA_UNBLOCKED_TOOLS``: subtract from the default blocklist
       (e.g. re-enable only ``delete_message`` without unlocking the rest).
-    - ``TELEGRAM_DISABLE_TOOLS``: add to the blocklist (e.g. disable routine
+    - ``TELEGRAM_EXTRA_BLOCKED_TOOLS``: add to the blocklist (e.g. disable routine
       writes like ``send_message`` for a near read-only posture).
 
     Conflict rule: a tool listed in both vars stays DISABLED.
@@ -1149,13 +1176,13 @@ def _apply_tool_disable_list() -> None:
         raw = os.getenv(name, "").strip()
         return {n.strip() for n in raw.split(",") if n.strip()}
 
-    enable_set = _parse_list("TELEGRAM_ENABLE_TOOLS")
-    disable_set = _parse_list("TELEGRAM_DISABLE_TOOLS")
+    enable_set = _parse_list("TELEGRAM_EXTRA_UNBLOCKED_TOOLS")
+    disable_set = _parse_list("TELEGRAM_EXTRA_BLOCKED_TOOLS")
 
     unknown_enables = enable_set - _DANGEROUS_TOOLS
     if unknown_enables:
         print(
-            "[telegram-mcp] Warning: TELEGRAM_ENABLE_TOOLS lists tools not in the "
+            "[telegram-mcp] Warning: TELEGRAM_EXTRA_UNBLOCKED_TOOLS lists tools not in the "
             f"default blocklist (no effect): {', '.join(sorted(unknown_enables))}",
             file=sys.stderr,
         )
