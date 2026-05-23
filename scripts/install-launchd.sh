@@ -59,8 +59,40 @@ EOF
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH"
 
-echo "[telegram-mcp] LaunchAgent installed. Retrieve your SSE token for IDE config:"
-echo "  security find-generic-password -a \"\$USER\" -s telegram-mcp-token -w"
+# Ensure the token is in Keychain (the launcher generates it on first run,
+# but we need it now to patch ~/.claude.json before the user restarts Claude Code).
+TOKEN="$(security find-generic-password -a "$USER" -s telegram-mcp-token -w 2>/dev/null || true)"
+if [[ -z "$TOKEN" ]]; then
+  TOKEN="$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")"
+  security add-generic-password -a "$USER" -s telegram-mcp-token -w "$TOKEN"
+  echo "[telegram-mcp] Generated and stored SSE token in Keychain"
+fi
+
+# Patch ~/.claude.json if telegram-mcp is registered there (stdio → SSE).
+CLAUDE_JSON="$HOME/.claude.json"
+if [[ -f "$CLAUDE_JSON" ]]; then
+  python3 - <<PYEOF
+import json, sys
+path = "$CLAUDE_JSON"
+with open(path) as f:
+    d = json.load(f)
+servers = d.get("mcpServers", {})
+if "telegram-mcp" in servers:
+    servers["telegram-mcp"] = {
+        "type": "sse",
+        "url": "http://127.0.0.1:8306/sse",
+        "headers": {"Authorization": "Bearer $TOKEN"},
+    }
+    with open(path, "w") as f:
+        json.dump(d, f, indent=2, ensure_ascii=False)
+    print("[telegram-mcp] ~/.claude.json updated to SSE mode — restart Claude Code to apply")
+else:
+    print("[telegram-mcp] ~/.claude.json has no telegram-mcp entry — skipping auto-patch")
+    print("               Add it manually if needed (see SETUP.md § SSE 步驟四)")
+PYEOF
+fi
+
+echo "[telegram-mcp] LaunchAgent installed and server started on port 8306"
 echo "[telegram-mcp] To check status: launchctl list | grep telegram-mcp"
 echo "[telegram-mcp] To stop:   launchctl unload ~/Library/LaunchAgents/com.telegram-mcp.server.plist"
 echo "[telegram-mcp] To start:  launchctl load   ~/Library/LaunchAgents/com.telegram-mcp.server.plist"
