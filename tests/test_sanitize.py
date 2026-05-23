@@ -151,7 +151,7 @@ class TestFormatToolResult:
         dt = datetime(2025, 1, 15, 12, 30, 0, tzinfo=timezone.utc)
         result = format_tool_result([{"date": dt}])
         parsed = json.loads(result)
-        assert parsed["results"][0]["date"] == "2025-01-15T12:30:00+00:00"
+        assert parsed["results"][0]["date"] == "2025-01-15T20:30:00+08:00"
 
     def test_unicode_not_escaped(self):
         result = format_tool_result([{"text": "Привет"}])

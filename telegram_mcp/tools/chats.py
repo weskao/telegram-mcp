@@ -215,7 +215,7 @@ async def list_topics(
             top_message_id = getattr(topic, "top_message", None)
             top_message = messages_map.get(top_message_id)
             if top_message and getattr(top_message, "date", None):
-                record["last_activity"] = top_message.date.isoformat()
+                record["last_activity"] = format_date(top_message.date)
 
             records.append(record)
 
@@ -787,7 +787,7 @@ async def get_message_read_by(
                 readers.append(
                     {
                         "user_id": item.user_id,
-                        "read_at": item.date.isoformat() if getattr(item, "date", None) else None,
+                        "read_at": format_date(item.date) if getattr(item, "date", None) else None,
                     }
                 )
             else:

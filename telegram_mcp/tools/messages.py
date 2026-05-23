@@ -36,7 +36,7 @@ async def get_messages(
             safe_text = sanitize_user_content(msg.message).replace("\n", "\\n")
 
             lines.append(
-                f"ID: {msg.id} | {sender_name} | Date: {msg.date}{reply_info}{engagement_info} | Message: {safe_text}"
+                f"ID: {msg.id} | {sender_name} | Date: {format_date(msg.date)}{reply_info}{engagement_info} | Message: {safe_text}"
             )
         return "\n".join(lines)
     except Exception as e:
@@ -169,7 +169,7 @@ async def get_scheduled_messages(chat_id: Union[int, str], account: str = None) 
             preview = sanitize_user_content(getattr(msg, "message", ""), max_length=100).replace(
                 "\n", "\\n"
             )
-            date_iso = msg.date.isoformat() if getattr(msg, "date", None) else "unknown"
+            date_iso = format_date(msg.date) if getattr(msg, "date", None) else "unknown"
             lines.append(f"ID: {msg.id} | Scheduled: {date_iso} | Text: {preview}")
         return "\n".join(lines)
     except telethon.errors.rpcerrorlist.ChatAdminRequiredError as e:
@@ -1342,7 +1342,7 @@ async def get_message_reactions(
                 {
                     "user_id": user_id,
                     "emoji": emoji,
-                    "date": reaction.date.isoformat() if reaction.date else None,
+                    "date": format_date(reaction.date) if reaction.date else None,
                 }
             )
 
@@ -1453,7 +1453,7 @@ async def get_drafts(account: str = None) -> str:
                         "peer_id": peer_id,
                         "message": sanitize_user_content(getattr(draft, "message", "")),
                         "date": (
-                            draft.date.isoformat()
+                            format_date(draft.date)
                             if hasattr(draft, "date") and draft.date
                             else None
                         ),

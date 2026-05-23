@@ -16,10 +16,21 @@ Defence strategy:
 """
 
 import json
+import os
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
+_TZ_OFFSET = int(os.getenv("TELEGRAM_DISPLAY_TZ", "8"))
+TZ_DISPLAY = timezone(timedelta(hours=_TZ_OFFSET))
+
+
+def format_date(dt: datetime) -> str:
+    """Format a datetime for display, converted to TZ_DISPLAY (default UTC+8)."""
+    if dt is None:
+        return "unknown"
+    return dt.astimezone(TZ_DISPLAY).isoformat()
 
 # Zero-width and invisible Unicode characters that can be used to hide content
 _INVISIBLE_CHARS = re.compile(
@@ -121,7 +132,7 @@ def sanitize_dict(data: Any) -> Any:
 def _json_default(obj: Any) -> Any:
     """JSON serializer for objects not serializable by default json code."""
     if isinstance(obj, datetime):
-        return obj.isoformat()
+        return format_date(obj)
     if isinstance(obj, bytes):
         return obj.decode("utf-8", errors="replace")
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
