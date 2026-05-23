@@ -1,8 +1,8 @@
-# Telegram MCP — 團隊 Setup 指南
+# Telegram MCP — Setup 指南
 
 每位成員需要用**自己的** Telegram 帳號完成以下步驟。Session 綁定個人帳號，不能共用。
 
-不需要 clone 專案，只需要安裝 [uv](https://docs.astral.sh/uv/)，其餘全部由 `uvx` 自動處理。
+基本模式（stdio）不需要 clone 專案，只需要安裝 [uv](https://docs.astral.sh/uv/)，其餘全部由 `uvx` 自動處理。進階 SSE 模式需要 clone 專案（使用 `scripts/install-launchd.sh`）。
 
 ---
 
@@ -156,6 +156,18 @@ export TELEGRAM_SESSION_STRING=$(security find-generic-password -a "$USER" -s te
 
 ---
 
+## 顯示時區
+
+所有工具輸出的時間戳記預設為 **UTC+8**。如需調整，在 `.mcp.json` 的 `env` 加入：
+
+```json
+"TELEGRAM_DISPLAY_TZ": "8"
+```
+
+值為整數 UTC 偏移小時，例如 `0` = UTC、`-5` = EST、`9` = JST。
+
+---
+
 ## 驗證安裝
 
 重啟 Claude Code 後執行：
@@ -208,108 +220,89 @@ uvx --from git+https://github.com/chigwell/telegram-mcp.git --reinstall telegram
 
 ## 進階：SSE 模式（多個 IDE 共用同一連線）
 
+> **前置要求**：SSE 模式需要 clone 本專案（`scripts/install-launchd.sh` 在 repo 裡）。
+
 ### 為什麼需要 SSE 模式？
 
-預設 stdio 模式下，每個 IDE（Claude Code、Claude Desktop、VS Code 等）各自啟動一個獨立的 `telegram-mcp` 進程。在同一台機器上多個 IDE 同時使用時，會因為頻繁的 session 重連而衝突。
+預設 stdio 模式下，每個 IDE 各自啟動一個獨立的 `telegram-mcp` 進程。同一台機器上多個 IDE 同時使用時，會因為 session 重連互相衝突。
 
 SSE（Server-Sent Events）模式改為啟動一個常駐 server，所有 IDE 透過 HTTP 連線共用同一個 session，避免重複初始化和衝突。
 
-### 步驟一：安裝 launchd 常駐服務
+### 步驟一：確認 Keychain 已有三個憑證
 
-這是一次性設置，會自動產生 token 並存入 Keychain。
+原本就設過的人跳過。三個指令都能印出值才繼續。
+
+```bash
+security find-generic-password -a "$USER" -s telegram-api-id -w
+security find-generic-password -a "$USER" -s telegram-api-hash -w
+security find-generic-password -a "$USER" -s telegram-session-string -w
+```
+
+若尚未設置，先完成上方步驟四。
+
+### 步驟二：安裝 launchd 常駐服務
 
 ```bash
 bash scripts/install-launchd.sh
 ```
 
-首次執行會提示，按照指示完成。script 會：
-1. 自動產生一個安全的 token
-2. 存入 macOS Keychain（`telegram-mcp-token`）
-3. 設定 launchd service 在開機時自動啟動 SSE server
+script 自動完成：
 
-### 步驟二：取得 Token（用於 IDE 設定）
+1. 產生 bearer token 並存入 Keychain（`telegram-mcp-token`）
+2. 在 `~/Library/LaunchAgents/` 建立 plist
+3. 立即載入並啟動 server 在 port 8306
 
-```bash
-security find-generic-password -a "$USER" -s telegram-mcp-token -w
-```
-
-複製輸出的 token 字串，後續 IDE 設定會用到。
-
-### 步驟三：更新 IDE 設定
-
-將原本的 stdio 模式改為 SSE URL 模式。
-
-#### 原本 (stdio 模式)
-
-```json
-{
-  "mcpServers": {
-    "telegram-mcp": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/chigwell/telegram-mcp.git",
-        "telegram-mcp"
-      ],
-      "env": {
-        "TELEGRAM_API_ID": "你的api_id",
-        "TELEGRAM_API_HASH": "你的api_hash",
-        "TELEGRAM_SESSION_STRING": "你的session_string"
-      }
-    }
-  }
-}
-```
-
-#### 改為 (SSE 模式)
-
-```json
-{
-  "mcpServers": {
-    "telegram-mcp": {
-      "url": "http://127.0.0.1:8306/sse",
-      "headers": {
-        "Authorization": "Bearer 你的_token"
-      }
-    }
-  }
-}
-```
-
-其中 `你的_token` 用第二步取得的值替換。
-
-### 步驟四：管理常駐服務
-
-#### 查看狀態
+### 步驟三：確認 server 已啟動
 
 ```bash
+curl -s http://127.0.0.1:8306/sse \
+  -H "Authorization: Bearer $(security find-generic-password -a "$USER" -s telegram-mcp-token -w)"
+```
+
+有輸出（`data:` 開頭的串流）即表示 server 正常運作。
+
+### 步驟四：重啟 Claude Code
+
+`install-launchd.sh` 已自動將 `~/.claude.json` 中的 `telegram-mcp` 從 stdio 改為 SSE 模式。重啟 Claude Code 即生效。
+
+> **若 `~/.claude.json` 沒有 `telegram-mcp` entry**（例如只用 `.mcp.json` 設定），script 會提示需要手動修改。此時取得 token 後手動填入：
+>
+> ```bash
+> security find-generic-password -a "$USER" -s telegram-mcp-token -w
+> ```
+>
+> ```json
+> {
+>   "mcpServers": {
+>     "telegram-mcp": {
+>       "type": "sse",
+>       "url": "http://127.0.0.1:8306/sse",
+>       "headers": {
+>         "Authorization": "Bearer <上面取得的token>"
+>       }
+>     }
+>   }
+> }
+> ```
+
+### 管理常駐服務
+
+```bash
+# 查看狀態（正常會顯示 PID）
 launchctl list | grep telegram-mcp
-```
 
-正常運作會顯示 service 的 PID。
-
-#### 停止服務
-
-```bash
+# 停止
 launchctl unload ~/Library/LaunchAgents/com.telegram-mcp.server.plist
-```
 
-#### 啟動服務
-
-```bash
+# 啟動
 launchctl load ~/Library/LaunchAgents/com.telegram-mcp.server.plist
-```
 
-#### 查看錯誤日誌
-
-```bash
+# 查看錯誤日誌
 tail -f ~/Library/Logs/telegram-mcp/server.err.log
 ```
-
-若 server 啟動失敗，查看這個日誌可以找到原因。
 
 ### 注意事項
 
 - SSE server 只在**本機**監聽（`127.0.0.1:8306`），不會暴露到網路。
-- Token 與 Keychain 中的 Telegram 憑證分離，token 只用於 IDE 之間的內部認證。
-- 停用 SSE 模式：編輯 IDE 設定，改回 stdio 模式（上方原本的設定）即可。launchd service 仍會在背景執行，但 IDE 會忽略它。
+- Token 只用於 IDE 之間的內部認證，與 Telegram 憑證分開管理。
+- 停用 SSE 模式：將 IDE 設定改回 stdio 模式即可。launchd service 仍在背景，但 IDE 會忽略它。
