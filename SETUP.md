@@ -4,7 +4,7 @@
 
 **推薦方式：SSE 模式**。一個常駐 server 在本機執行，所有 IDE 透過 HTTP 共用同一條 session，避免多個 IDE 同時啟動時互相衝突。設定完成後在 `~/.claude.json` 全域登記一次，所有專案均可使用，不需要在各專案中重複設定 `.mcp.json`。
 
-> 若不想 clone 本專案，可改用[備用：stdio 模式](#備用stdio-模式無需-clone-本專案)，但同一台機器上多個 IDE 同時使用時會有 session 衝突問題。
+> 若不想 clone 本專案，可改用[備用：stdio 模式](#備用stdio-模式)，但同一台機器上多個 IDE 同時使用時會有 session 衝突問題。
 
 ---
 
@@ -408,13 +408,21 @@ for p, v in d.get('projects', {}).items():
 
 ---
 
-## 備用：stdio 模式（無需 clone 本專案）
+## 備用：stdio 模式
 
-只需安裝 uv，不需要 clone 本專案。缺點：同一台機器多個 IDE 同時使用時，各自啟動獨立進程，會因 session 重連互相衝突。
+缺點：同一台機器多個 IDE 同時使用時，各自啟動獨立進程，會因 session 重連互相衝突。
 
-完成步驟一至三後，在 `.mcp.json` 或 Claude Desktop config 中加入：
+兩種子方式：
+
+| | 方式 A — uvx | 方式 B — start.sh |
+| --- | --- | --- |
+| 需要 clone 專案 | 否 | 是 |
+| 憑證存放 | `.mcp.json` 明文 或 `~/.zshrc` 匯出 | macOS Keychain |
+| 適合對象 | 快速試用 | 已完成步驟一至三者 |
 
 ### Claude Code（.mcp.json）
+
+#### 方式 A — uvx（無需 clone）
 
 ```json
 {
@@ -448,7 +456,25 @@ export TELEGRAM_SESSION_STRING=$(security find-generic-password -a "$USER" -s te
 
 工具存取控制、時區等設定在 `env` 區塊中加入對應變數。
 
+#### 方式 B — start.sh（已 clone 專案 + 憑證在 Keychain）
+
+完成步驟一至三後，`scripts/start.sh` 會在執行時自動從 Keychain 讀取憑證，`.mcp.json` 不需要任何 `env` 欄位：
+
+```json
+{
+  "mcpServers": {
+    "telegram-mcp": {
+      "command": "/absolute/path/to/telegram-mcp/scripts/start.sh"
+    }
+  }
+}
+```
+
+將路徑替換為實際位置（在專案根目錄執行 `pwd` 取得）。
+
 ### Claude Desktop
+
+#### 方式 A — uvx
 
 編輯 `~/Library/Application Support/Claude/claude_desktop_config.json`：
 
@@ -467,6 +493,18 @@ export TELEGRAM_SESSION_STRING=$(security find-generic-password -a "$USER" -s te
         "TELEGRAM_API_HASH": "你的api_hash",
         "TELEGRAM_SESSION_STRING": "你的session_string"
       }
+    }
+  }
+}
+```
+
+#### 方式 B — start.sh（已 clone + Keychain）
+
+```json
+{
+  "mcpServers": {
+    "telegram-mcp": {
+      "command": "/absolute/path/to/telegram-mcp/scripts/start.sh"
     }
   }
 }
