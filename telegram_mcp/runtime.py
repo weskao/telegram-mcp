@@ -45,7 +45,6 @@ import re
 from functools import wraps
 import telethon.errors.rpcerrorlist
 from sanitize import sanitize_user_content, sanitize_name, sanitize_dict, format_tool_result, format_date
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -111,16 +110,32 @@ _transport: str = "stdio"
 _sse_port: int = 8306
 
 
-class BearerTokenMiddleware(BaseHTTPMiddleware):
+class BearerTokenMiddleware:
+    """Pure ASGI bearer-token gate. Compatible with streaming responses (SSE)."""
+
     def __init__(self, app, token: str):
-        super().__init__(app)
+        self.app = app
         self._token = token
 
-    async def dispatch(self, request: Request, call_next):
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or auth[7:] != self._token:
-            return Response("Unauthorized", status_code=401)
-        return await call_next(request)
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        auth = b""
+        for name, value in scope.get("headers", []):
+            if name == b"authorization":
+                auth = value
+                break
+        expected = b"Bearer " + self._token.encode("ascii")
+        if auth != expected:
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+            })
+            await send({"type": "http.response.body", "body": b"Unauthorized"})
+            return
+        await self.app(scope, receive, send)
 
 
 # Annotate all tool results with audience=["user"] so MCP clients know

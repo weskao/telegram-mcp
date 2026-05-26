@@ -9,6 +9,7 @@ try:
 except UnsafeInstallationError as exc:
     raise SystemExit(str(exc)) from None
 
+from telegram_mcp import runtime
 from telegram_mcp.runtime import *
 import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
 
@@ -41,7 +42,7 @@ async def _main() -> None:
         await asyncio.gather(*(cl.get_dialogs() for cl in clients.values()))
 
         print(f"Telegram client(s) started ({labels}). Running MCP server...", file=sys.stderr)
-        if _transport == "sse":
+        if runtime._transport == "sse":
             token = os.getenv("TELEGRAM_MCP_TOKEN", "")
             if not token:
                 print(
@@ -53,7 +54,7 @@ async def _main() -> None:
             app = mcp.sse_app()
             if token:
                 app = BearerTokenMiddleware(app, token)
-            config = uvicorn.Config(app, host="127.0.0.1", port=_sse_port, log_level="warning")
+            config = uvicorn.Config(app, host="127.0.0.1", port=runtime._sse_port, log_level="warning")
             server = uvicorn.Server(config)
             await server.serve()
         else:
@@ -78,7 +79,7 @@ async def _main() -> None:
 def main() -> None:
     _configure_allowed_roots_from_cli(sys.argv[1:])
     _apply_tool_disable_list()
-    if _transport == "stdio":
+    if runtime._transport == "stdio":
         nest_asyncio.apply()
     asyncio.run(_main())
 
