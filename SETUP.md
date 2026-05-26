@@ -276,7 +276,7 @@ TELEGRAM_EXTRA_BLOCKED_TOOLS=send_message,forward_message,edit_message,block_use
 所有工具輸出的時間戳記預設為 **UTC+8**。如需調整，在 `.env` 加入：
 
 ```bash
-TELEGRAM_DISPLAY_TZ=8
+TELEGRAM_DISPLAY_UTC_OFFSET=8
 ```
 
 值為整數 UTC 偏移小時，例如 `0` = UTC、`-5` = EST、`9` = JST。

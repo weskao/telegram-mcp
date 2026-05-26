@@ -22,7 +22,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-_TZ_OFFSET = int(os.getenv("TELEGRAM_DISPLAY_TZ", "8"))
+_TZ_OFFSET = int(os.getenv("TELEGRAM_DISPLAY_UTC_OFFSET", "8"))
 TZ_DISPLAY = timezone(timedelta(hours=_TZ_OFFSET))
 
 
