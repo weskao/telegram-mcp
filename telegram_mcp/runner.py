@@ -78,7 +78,12 @@ async def _main() -> None:
 
 def main() -> None:
     _configure_allowed_roots_from_cli(sys.argv[1:])
+    # Fork blocklist (default dangerous-tool removal) AND upstream read-only
+    # exposure mode are complementary — apply both before serving.
     _apply_tool_disable_list()
+    _apply_exposed_tools_mode()
+    # nest_asyncio is only needed for the stdio path's nested asyncio.run; the
+    # SSE path runs under uvicorn's own event loop and must not be patched.
     if runtime._transport == "stdio":
         nest_asyncio.apply()
     asyncio.run(_main())

@@ -275,3 +275,49 @@ def test_media_label_sticker_includes_alt():
 
     sticker = SimpleNamespace(attributes=[SimpleNamespace(alt="😀")])
     assert get_media_label(_media_msg(sticker=sticker)) == "sticker 😀"
+
+
+# ---------------------------------------------------------------------------
+# Message-line formatting must preserve the display-offset feature
+# ---------------------------------------------------------------------------
+
+
+def test_format_message_line_date_uses_display_offset():
+    """get_messages' single-line output must honour TELEGRAM_DISPLAY_UTC_OFFSET.
+
+    Upstream's format_message_line renders ``Date: {msg.date}`` (raw UTC). The
+    fork routes dates through ``format_date`` so timestamps respect the
+    configured offset (default UTC+8). This guards that the merge did not
+    re-introduce the raw-UTC rendering.
+    """
+    from telegram_mcp.tools.messages import format_message_line
+
+    msg = _media_msg(
+        id=7,
+        date=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+        message="hello",
+        sender=None,
+        reply_to=None,
+    )
+    line = format_message_line(msg)
+
+    assert "Date: 2026-01-01T08:00:00+08:00" in line
+    assert "00:00:00+00:00" not in line  # raw UTC must not leak through
+
+
+def test_message_to_dict_json_date_uses_display_offset():
+    """The structured (JSON) listing path must also honour the display offset."""
+    import json
+
+    from sanitize import format_tool_result
+    from telegram_mcp.tools.messages import message_to_dict
+
+    msg = _media_msg(
+        id=9,
+        date=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+        message="hi",
+        sender=None,
+    )
+    payload = json.loads(format_tool_result([message_to_dict(msg)]))
+
+    assert payload["results"][0]["date"] == "2026-01-01T08:00:00+08:00"
