@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import io
 import os
+import subprocess
 import sys
 
 from dotenv import load_dotenv
@@ -33,6 +34,51 @@ from telethon.sync import TelegramClient
 from telegram_mcp.install_guard import UnsafeInstallationError, assert_safe_distribution
 
 load_dotenv()
+
+
+def _store_in_keychain(service: str, value: str) -> bool:
+    """Store ``value`` in the macOS login Keychain under ``service``.
+
+    Uses the ``security`` CLI with ``-U`` so an existing item is updated rather
+    than duplicated. Returns ``True`` on success; ``False`` if ``security`` is
+    unavailable (non-macOS) or the command fails.
+    """
+    account = os.getenv("USER") or ""
+    try:
+        subprocess.run(
+            ["security", "add-generic-password", "-U",
+             "-a", account, "-s", service, "-w", value],
+            check=True,
+            capture_output=True,
+        )
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+
+def _update_env_file(env_var: str, session_string: str) -> None:
+    """Write ``env_var=session_string`` into the local .env file."""
+    try:
+        try:
+            with open(".env", "r") as file:
+                env_contents = file.readlines()
+        except FileNotFoundError:
+            env_contents = []
+
+        for i, line in enumerate(env_contents):
+            if line.startswith(f"{env_var}="):
+                env_contents[i] = f"{env_var}={session_string}\n"
+                break
+        else:
+            env_contents.append(f"{env_var}={session_string}\n")
+
+        with open(".env", "w") as file:
+            file.writelines(env_contents)
+
+        print("\n.env file updated successfully!")
+    except Exception as e:
+        print(f"\nError updating .env file: {e}")
+        print("Please manually add the session string to your .env file.")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -176,8 +222,10 @@ def main() -> None:
 
         if label:
             env_var = f"TELEGRAM_SESSION_STRING_{label.upper()}"
+            keychain_service = f"telegram-session-string-{label.lower()}"
         else:
             env_var = "TELEGRAM_SESSION_STRING"
+            keychain_service = "telegram-session-string"
 
         print("\nAuthentication successful!")
         print("\n----- Your Session String -----")
@@ -187,30 +235,16 @@ def main() -> None:
         print("\nIMPORTANT: Keep this string private and never share it with anyone!")
 
         choice = input(
-            "\nWould you like to automatically update your .env file with this session string? (y/N): "
+            "\nStore this session string in the macOS Keychain? (y/N): "
         )
         if choice.lower() == "y":
-            try:
-                with open(".env", "r") as file:
-                    env_contents = file.readlines()
-
-                session_string_line_found = False
-                for i, line in enumerate(env_contents):
-                    if line.startswith(f"{env_var}="):
-                        env_contents[i] = f"{env_var}={session_string}\n"
-                        session_string_line_found = True
-                        break
-
-                if not session_string_line_found:
-                    env_contents.append(f"{env_var}={session_string}\n")
-
-                with open(".env", "w") as file:
-                    file.writelines(env_contents)
-
-                print("\n.env file updated successfully!")
-            except Exception as e:
-                print(f"\nError updating .env file: {e}")
-                print("Please manually add the session string to your .env file.")
+            if _store_in_keychain(keychain_service, session_string):
+                print(f"\n✅ Stored in Keychain (service: {keychain_service}).")
+            else:
+                print("\n⚠️  Could not store in Keychain; falling back to .env.")
+                _update_env_file(env_var, session_string)
+        else:
+            _update_env_file(env_var, session_string)
 
         client.disconnect()
 

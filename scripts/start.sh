@@ -23,6 +23,22 @@ _keychain_get() {
 : "${TELEGRAM_SESSION_STRING:=$(_keychain_get telegram-session-string)}"
 : "${TELEGRAM_MCP_TOKEN:=$(_keychain_get telegram-mcp-token)}"
 
+# Multi-account: labeled session strings are stored as
+# `telegram-session-string-<label>`. Export each as TELEGRAM_SESSION_STRING_<LABEL>
+# so the server's account discovery picks them up. The unsuffixed default above is
+# excluded (it has no trailing label).
+while IFS= read -r _svc; do
+  _label="${_svc#telegram-session-string-}"
+  [[ -z "$_label" || "$_label" == "$_svc" ]] && continue
+  _var="TELEGRAM_SESSION_STRING_$(printf '%s' "$_label" | tr '[:lower:]' '[:upper:]')"
+  if [[ -z "${!_var:-}" ]]; then
+    _value="$(_keychain_get "$_svc")"
+    [[ -n "$_value" ]] && export "$_var=$_value"
+  fi
+done < <(security dump-keychain 2>/dev/null \
+           | sed -n 's/.*"svce"<blob>="\(telegram-session-string-[^"]*\)".*/\1/p' \
+           | sort -u)
+
 if [[ -z "$TELEGRAM_MCP_TOKEN" ]]; then
   TELEGRAM_MCP_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
   security add-generic-password -a "$USER" -s telegram-mcp-token -w "$TELEGRAM_MCP_TOKEN"

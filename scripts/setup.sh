@@ -14,7 +14,7 @@
 # Required user input (interactive prompts):
 #   - Telegram API ID and API Hash (from https://my.telegram.org/apps)
 #   - Phone number and Telegram verification code (for session string generation)
-#   - Paste the resulting session string when prompted
+#   - Choose "store in Keychain" when the generator asks
 
 set -euo pipefail
 
@@ -109,21 +109,14 @@ if [[ -n "$EXISTING_SESSION" ]]; then
   if [[ ! "$REDO_SESSION" =~ ^[Yy]$ ]]; then
     echo "  ✅ 沿用 Keychain 中的 session string"
     echo
-    SESSION_STRING="$EXISTING_SESSION"
     SKIP_SESSION=1
   fi
 fi
 
 if [[ -z "${SKIP_SESSION:-}" ]]; then
-  echo "  即將啟動互動式 session 產生器（需要輸入手機號碼和 Telegram 驗證碼）…"
-  echo
   TELEGRAM_API_ID="$API_ID" \
   TELEGRAM_API_HASH="$API_HASH" \
     uv --directory "$PROJECT_DIR" run telegram-mcp-generate-session
-  echo
-  read -rp "  請將上方顯示的 Session String 貼入此處：" SESSION_STRING
-  _kc_set "telegram-session-string" "$SESSION_STRING"
-  echo "  ✅ Session string 已存入 Keychain"
 fi
 echo
 
