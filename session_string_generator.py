@@ -93,7 +93,10 @@ def _qr_login(client: TelegramClient) -> None:
 
 
 def _phone_login(client: TelegramClient) -> None:
-    phone = input("Please enter your phone (or bot token): ")
+    phone = input(
+        "Please enter your phone with country code (e.g. +886912345678), "
+        "or a bot token: "
+    )
 
     try:
         client.send_code_request(phone)
