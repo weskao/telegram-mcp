@@ -87,7 +87,7 @@ uv run telegram-mcp-generate-session
 
 SSE 常駐服務在開機後自動從 Keychain 載入 Telegram 憑證（`api_id`、`api_hash`、`session_string`）。**這三項憑證不會寫入任何 config 檔**。
 
-> **SSE bearer token 說明：** `install-launchd.sh` 會另外產生一個本機服務鑑權 token（與上述 Telegram 憑證無關），並將其寫入 `~/.claude.json`，供 Claude Code 連線 SSE server 使用。這是預期行為，`~/.claude.json` 權限為 `600`（僅本機使用者可讀），bearer token 也只對 `127.0.0.1:8306` 有效，不直接暴露 Telegram 帳號存取權。
+> **SSE bearer token 說明：** `install-launchd.sh` 會另外產生一個本機服務鑑權 token（與上述 Telegram 憑證無關），並將其存入 Keychain（`telegram-mcp-token`）。同時自動將 `scripts/mcp-auth-headers.sh` 複製到 `~/.claude/scripts/mcp-auth-headers.sh`（若已存在則跳過）。`~/.claude.json` 使用 `headersHelper` 欄位指向此腳本，Claude Code 在每次連線時執行即時讀取，**token 不會寫入任何設定檔**。
 
 ```bash
 security add-generic-password -a "$USER" -s telegram-api-id        -w "你的api_id"
@@ -131,7 +131,7 @@ curl -s http://127.0.0.1:8306/sse \
 
 ## 步驟五：設定 ~/.claude.json
 
-> **推薦：直接使用 `bash scripts/setup.sh`**，會自動完成此步驟（包含填入 token、清理舊進程、驗證 SSE）。
+> **推薦：直接使用 `bash scripts/setup.sh`**，會自動完成此步驟（包含設定 headersHelper、清理舊進程、驗證 SSE）。
 > 以下為手動 fallback，僅在不使用 `setup.sh` 時參考。
 
 `install-launchd.sh` 已自動產生 bearer token（存於 Keychain `telegram-mcp-token`）。
@@ -140,26 +140,17 @@ curl -s http://127.0.0.1:8306/sse \
 
 若 script 輸出 `~/.claude.json has no telegram-mcp entry — skipping auto-patch`，表示 `~/.claude.json` 中尚無此 entry，需手動加入。
 
-> **bearer token 必須以明文填入 `~/.claude.json`：** `headers` 欄位是靜態 JSON，不支援 `$(security ...)` 等 shell 動態取值。這是 Claude Code 的設計限制。
-> 可接受性：token 只對 `127.0.0.1:8306` 有效，`~/.claude.json` 權限為 `600`，Telegram 憑證本身仍在 Keychain 中，不受影響。
-
-取得 token：
-
-```bash
-security find-generic-password -a "$USER" -s telegram-mcp-token -w
-```
-
-在 `~/.claude.json` 的 `mcpServers` 物件中加入（將上一行的輸出值直接貼入）：
+在 `~/.claude.json` 的 `mcpServers` 物件中加入（直接複製貼上，不需要手動填入 token）：
 
 ```json
 "telegram-mcp": {
   "type": "sse",
   "url": "http://127.0.0.1:8306/sse",
-  "headers": {
-    "Authorization": "Bearer <上一行印出的token>"
-  }
+  "headersHelper": "$HOME/.claude/scripts/mcp-auth-headers.sh"
 }
 ```
+
+`headersHelper` 在每次連線時由 Claude Code 執行，即時從 Keychain 讀取 token，**token 不會寫入設定檔**。
 
 完全結束 Claude Code（**所有視窗**）後重新開啟即生效。
 
