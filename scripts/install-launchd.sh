@@ -69,26 +69,12 @@ fi
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH"
 
-# Install headersHelper script to ~/.claude/scripts/ if not already present.
-# The script reads the telegram-mcp token from Keychain at connection time so
-# the token never has to be written into ~/.claude.json.
-HELPER_DIR="$HOME/.claude/scripts"
-HELPER_SCRIPT="$HELPER_DIR/mcp-auth-headers.sh"
-if [[ ! -f "$HELPER_SCRIPT" ]]; then
-  mkdir -p "$HELPER_DIR"
-  cp "$SCRIPT_DIR/mcp-auth-headers.sh" "$HELPER_SCRIPT"
-  chmod +x "$HELPER_SCRIPT"
-  echo "[telegram-mcp] Installed headersHelper → $HELPER_SCRIPT"
-else
-  echo "[telegram-mcp] headersHelper already present — skipping ($HELPER_SCRIPT)"
-fi
-
 # Patch ~/.claude.json if telegram-mcp is registered there (stdio → SSE).
 CLAUDE_JSON="$HOME/.claude.json"
 if [[ -f "$CLAUDE_JSON" ]]; then
-  python3 - "$CLAUDE_JSON" <<'PYEOF'
+  python3 - "$CLAUDE_JSON" "$PROJECT_DIR" <<'PYEOF'
 import json, sys
-path = sys.argv[1]
+path, project_dir = sys.argv[1], sys.argv[2]
 with open(path) as f:
     d = json.load(f)
 servers = d.get("mcpServers", {})
@@ -96,7 +82,7 @@ if "telegram-mcp" in servers:
     servers["telegram-mcp"] = {
         "type": "sse",
         "url": "http://127.0.0.1:8306/sse",
-        "headersHelper": "$HOME/.claude/scripts/mcp-auth-headers.sh",
+        "headersHelper": f"{project_dir}/scripts/mcp-auth-headers.sh",
     }
     with open(path, "w") as f:
         json.dump(d, f, indent=2, ensure_ascii=False)

@@ -87,7 +87,7 @@ uv run telegram-mcp-generate-session
 
 SSE 常駐服務在開機後自動從 Keychain 載入 Telegram 憑證（`api_id`、`api_hash`、`session_string`）。**這三項憑證不會寫入任何 config 檔**。
 
-> **SSE bearer token 說明：** `install-launchd.sh` 會另外產生一個本機服務鑑權 token（與上述 Telegram 憑證無關），並將其存入 Keychain（`telegram-mcp-token`）。同時自動將 `scripts/mcp-auth-headers.sh` 複製到 `~/.claude/scripts/mcp-auth-headers.sh`（若已存在則跳過）。`~/.claude.json` 使用 `headersHelper` 欄位指向此腳本，Claude Code 在每次連線時執行即時讀取，**token 不會寫入任何設定檔**。
+> **SSE bearer token 說明：** `install-launchd.sh` 會另外產生一個本機服務鑑權 token（與上述 Telegram 憑證無關），並將其存入 Keychain（`telegram-mcp-token`）。`~/.claude.json` 使用 `headersHelper` 欄位指向專案內的 `scripts/mcp-auth-headers.sh`，Claude Code 在每次連線時執行該腳本即時讀取，**token 不會寫入任何設定檔**。
 
 ```bash
 security add-generic-password -a "$USER" -s telegram-api-id        -w "你的api_id"
@@ -140,13 +140,19 @@ curl -s http://127.0.0.1:8306/sse \
 
 若 script 輸出 `~/.claude.json has no telegram-mcp entry — skipping auto-patch`，表示 `~/.claude.json` 中尚無此 entry，需手動加入。
 
-在 `~/.claude.json` 的 `mcpServers` 物件中加入（直接複製貼上，不需要手動填入 token）：
+先取得專案的絕對路徑：
+
+```bash
+pwd   # 在專案根目錄執行，複製輸出的路徑
+```
+
+在 `~/.claude.json` 的 `mcpServers` 物件中加入（將 `/path/to/telegram-mcp` 換成上面的路徑）：
 
 ```json
 "telegram-mcp": {
   "type": "sse",
   "url": "http://127.0.0.1:8306/sse",
-  "headersHelper": "$HOME/.claude/scripts/mcp-auth-headers.sh"
+  "headersHelper": "/path/to/telegram-mcp/scripts/mcp-auth-headers.sh"
 }
 ```
 

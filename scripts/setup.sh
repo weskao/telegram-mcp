@@ -138,16 +138,16 @@ if [[ -z "$TOKEN" ]]; then
 elif [[ ! -f "$CLAUDE_JSON" ]]; then
   echo "  ⚠️  ~/.claude.json 不存在，請先啟動 Claude Code 一次再執行本 script"
 else
-  python3 - "$CLAUDE_JSON" <<'PYEOF'
+  python3 - "$CLAUDE_JSON" "$PROJECT_DIR" <<'PYEOF'
 import json, sys
-path = sys.argv[1]
+path, project_dir = sys.argv[1], sys.argv[2]
 with open(path) as f:
     d = json.load(f)
 servers = d.setdefault("mcpServers", {})
 servers["telegram-mcp"] = {
     "type": "sse",
     "url": "http://127.0.0.1:8306/sse",
-    "headersHelper": "$HOME/.claude/scripts/mcp-auth-headers.sh",
+    "headersHelper": f"{project_dir}/scripts/mcp-auth-headers.sh",
 }
 # Detect project-level overrides that would shadow the global SSE config.
 overrides = []
