@@ -56,6 +56,33 @@ def _store_in_keychain(service: str, value: str) -> bool:
         return False
 
 
+def _register_session_label(label: str) -> None:
+    """Track ``label`` in the ``telegram-session-labels`` Keychain index.
+
+    ``scripts/start.sh`` reads this comma-separated index to enumerate
+    multi-account sessions without resorting to ``security dump-keychain``
+    (which would expose every keychain item and can trigger access prompts).
+    """
+    index_service = "telegram-session-labels"
+    account = os.getenv("USER") or ""
+    label = label.lower()
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-a", account,
+             "-s", index_service, "-w"],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return
+    existing = result.stdout.strip() if result.returncode == 0 else ""
+    labels = {part for part in existing.split(",") if part}
+    if label in labels:
+        return
+    labels.add(label)
+    _store_in_keychain(index_service, ",".join(sorted(labels)))
+
+
 def _update_env_file(env_var: str, session_string: str) -> None:
     """Write ``env_var=session_string`` into the local .env file."""
     try:
@@ -239,6 +266,8 @@ def main() -> None:
         )
         if choice.lower() == "y":
             if _store_in_keychain(keychain_service, session_string):
+                if label:
+                    _register_session_label(label)
                 print(f"\n✅ Stored in Keychain (service: {keychain_service}).")
             else:
                 print("\n⚠️  Could not store in Keychain; falling back to .env.")

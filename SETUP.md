@@ -294,6 +294,13 @@ TELEGRAM_SESSION_STRING_PERSONAL=個人帳號的session_string
 多帳號模式下，讀取類工具（`get_messages`、`list_chats` 等）若未指定 `account` 參數，會同時查詢所有帳號並合併結果；寫入類工具（`send_message` 等）則必須明確指定 `account`。
 
 > 建議將各帳號的 session string 存入 Keychain，再在 `.env` 中以指令讀取，避免明文儲存。
+>
+> 透過 `session_string_generator.py` 產生並存入 Keychain 時，標籤會自動登記到索引項目 `telegram-session-labels`，`scripts/start.sh` 即可據此列出所有帳號（無需掃描整個 Keychain）。**若你手動以 `security add-generic-password` 存入帶標籤的 session（或在此功能之前就已存入），需自行把標籤補進索引**，否則 `start.sh` 不會載入它：
+>
+> ```bash
+> # 例如已有 work / personal 兩個帳號
+> security add-generic-password -U -a "$USER" -s telegram-session-labels -w "personal,work"
+> ```
 
 ---
 
