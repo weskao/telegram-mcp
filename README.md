@@ -30,6 +30,7 @@ Message sent successfully:
 - [Quick Start](#quick-start)
 - [MCP Client Configuration](#mcp-client-configuration)
 - [Multi-Account Setup](#multi-account-setup)
+- [Device Identity](#device-identity)
 - [Proxy Support](#proxy-support)
 - [File Path Security](#file-path-security)
 - [Docker](#docker)
@@ -199,6 +200,48 @@ from GitHub explicitly:
 uvx --from "git+https://github.com/chigwell/telegram-mcp.git@<pinned-release-tag-or-commit>" telegram-mcp-generate-session
 ```
 
+### Transports
+
+The server speaks three MCP transports, selected with `MCP_TRANSPORT`:
+
+| Value   | Transport                  | Use case                                                        |
+| ------- | -------------------------- | --------------------------------------------------------------- |
+| `stdio` | stdio (default)            | One dedicated server process per MCP client                     |
+| `http`  | streamable HTTP            | One shared server for many clients (Claude Code, Codex, Cursor) |
+| `sse`   | SSE (legacy HTTP)          | Clients that only support the deprecated SSE transport          |
+
+For `http` and `sse`, the server binds `MCP_HOST`:`MCP_PORT` (default
+`127.0.0.1:8765`); the streamable HTTP endpoint is `/mcp`, the SSE endpoint is
+`/sse`.
+
+Prefer `http` when more than one MCP client (or many coding-agent sessions)
+will use the server: a single long-lived process holds one Telegram
+connection, instead of every client spawning its own Telethon session —
+Telegram throttles and may flag accounts that open many parallel sessions.
+
+Register the shared server with clients:
+
+```bash
+# Claude Code
+claude mcp add --transport http telegram http://127.0.0.1:8765/mcp
+
+# Codex
+codex mcp add telegram --url http://127.0.0.1:8765/mcp
+```
+
+For stdio-only clients, bridge with [mcp-remote](https://www.npmjs.com/package/mcp-remote):
+
+```json
+{
+  "mcpServers": {
+    "telegram-mcp": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:8765/mcp"]
+    }
+  }
+}
+```
+
 ## Multi-Account Setup
 
 Use suffixed session variables to configure multiple Telegram accounts:
@@ -221,6 +264,24 @@ Example prompts:
 - "List my accounts"
 - "Show unread messages from all accounts"
 - "Send this from my work account to @example"
+
+## Device Identity
+
+These optional variables control how the client appears in Telegram under
+**Settings > Devices** (the active-sessions list):
+
+```env
+TELEGRAM_DEVICE_MODEL=Telegram MCP
+TELEGRAM_SYSTEM_VERSION=1.0
+TELEGRAM_APP_VERSION=1.0
+```
+
+If left unset, Telethon falls back to the host platform (for example `arm64`).
+Because these values are re-sent on every connection, a long-running server
+would otherwise overwrite the name chosen during login on each reconnect, so
+set them to keep a stable, recognisable device name. The same variables are
+read both by the session string generator (at login) and by the server (on
+every connect), so set them in the same place as your other credentials.
 
 ## Proxy Support
 
@@ -286,11 +347,16 @@ Allowed roots can come from:
 Security behavior:
 
 - Client MCP Roots replace server CLI roots when available.
+- Some clients (notably Cursor) return workspace roots as bare absolute paths
+  instead of `file://` URIs. That breaks MCP SDK validation of `list_roots`;
+  the server recovers those absolute paths from the validation error so
+  file-path tools keep working.
 - Empty client Roots are treated as deny-all by default. Some clients implement
   the Roots capability but advertise an empty list, which disables file tools
   even when server CLI roots are configured. Set
   `TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1` to fall back to the server CLI roots
-  in that case (opt-in; the default stays deny-all).
+  in that case (opt-in; the default stays deny-all). The same opt-in also applies
+  when `list_roots` fails unexpectedly and no client paths could be recovered.
 - Paths are resolved through real paths and must stay inside an allowed root.
 - Traversal, wildcard-like, shell-like, and null-byte path patterns are rejected.
 - Relative paths resolve under the first allowed root.
@@ -336,21 +402,51 @@ Build the image:
 docker build -t telegram-mcp:latest .
 ```
 
-Run with Compose:
+### Shared server (recommended)
+
+Run one long-lived container serving streamable HTTP, and point every MCP
+client at it (see [Transports](#transports) for client registration):
 
 ```bash
-docker compose up --build
-```
-
-Run directly:
-
-```bash
-docker run -it --rm \
-  -e TELEGRAM_API_ID="YOUR_API_ID" \
-  -e TELEGRAM_API_HASH="YOUR_API_HASH" \
-  -e TELEGRAM_SESSION_STRING="YOUR_SESSION_STRING" \
+docker run -d --name telegram-mcp --restart unless-stopped \
+  --env-file .env \
+  -e MCP_TRANSPORT=http \
+  -e MCP_HOST=0.0.0.0 \
+  -p 127.0.0.1:8765:8765 \
   telegram-mcp:latest
 ```
+
+`MCP_HOST=0.0.0.0` binds inside the container so the published port works;
+`-p 127.0.0.1:8765:8765` keeps the server reachable only from the local
+machine — the endpoint is unauthenticated, so never publish it on a public
+interface.
+
+The bundled Compose file runs the same setup:
+
+```bash
+docker compose up --build -d
+```
+
+### One container per client (stdio)
+
+Alternatively, an MCP client can spawn a dedicated container itself:
+
+```json
+{
+  "mcpServers": {
+    "telegram-mcp": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "--env-file", "/full/path/to/.env", "telegram-mcp:latest"]
+    }
+  }
+}
+```
+
+This is fine for a single client, but with several clients (or coding agents
+that spawn subagent sessions) each one starts its own container and its own
+Telegram session, which Telegram throttles; a client that exits uncleanly can
+also leave its container running. Prefer the shared server above in those
+setups.
 
 For multiple accounts, pass variables such as `TELEGRAM_SESSION_STRING_WORK` and `TELEGRAM_SESSION_STRING_PERSONAL`.
 

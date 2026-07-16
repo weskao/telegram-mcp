@@ -28,6 +28,39 @@ async def _connect_authorized_client(label, client) -> None:
     )
 
 
+async def _serve(transport: str) -> None:
+    """Run the MCP server on the selected transport.
+
+    HTTP transports let one long-lived process hold a single shared Telegram
+    connection while multiple local MCP clients connect over HTTP, instead of
+    each client spawning its own Telethon session (which Telegram
+    throttles/flags). "http" is streamable HTTP — the current MCP transport
+    that Claude Code (`--transport http`) and Codex (`--url`) speak natively;
+    "sse" is kept for clients that only support the legacy SSE transport.
+    """
+    if transport in ("http", "sse"):
+        # Fork: run our own uvicorn so both HTTP transports go through
+        # BearerTokenMiddleware (upstream serves them unauthenticated).
+        token = os.getenv("TELEGRAM_MCP_TOKEN", "")
+        if not token:
+            print(
+                f"[telegram-mcp] WARNING: TELEGRAM_MCP_TOKEN not set — {transport} running without auth",
+                file=sys.stderr,
+            )
+        import uvicorn
+
+        app = mcp.streamable_http_app() if transport == "http" else mcp.sse_app()
+        if token:
+            app = BearerTokenMiddleware(app, token)
+        host = os.getenv("MCP_HOST", "127.0.0.1")
+        config = uvicorn.Config(app, host=host, port=runtime._sse_port, log_level="warning")
+        server = uvicorn.Server(config)
+        await server.serve()
+    else:
+        # Use the asynchronous entrypoint instead of mcp.run()
+        await mcp.run_stdio_async()
+
+
 async def _main() -> None:
     try:
         labels = ", ".join(clients.keys())
@@ -52,24 +85,11 @@ async def _main() -> None:
 
         warm_task = asyncio.create_task(_warm_caches())
 
-        print(f"Telegram client(s) started ({labels}). Running MCP server...", file=sys.stderr)
-        if runtime._transport == "sse":
-            token = os.getenv("TELEGRAM_MCP_TOKEN", "")
-            if not token:
-                print(
-                    "[telegram-mcp] WARNING: TELEGRAM_MCP_TOKEN not set — SSE running without auth",
-                    file=sys.stderr,
-                )
-            import uvicorn
-
-            app = mcp.sse_app()
-            if token:
-                app = BearerTokenMiddleware(app, token)
-            config = uvicorn.Config(app, host="127.0.0.1", port=runtime._sse_port, log_level="warning")
-            server = uvicorn.Server(config)
-            await server.serve()
-        else:
-            await mcp.run_stdio_async()
+        print(
+            f"Telegram client(s) started ({labels}). Running MCP server ({runtime._transport})...",
+            file=sys.stderr,
+        )
+        await _serve(runtime._transport)
     except Exception as e:
         print(f"Error starting client: {e}", file=sys.stderr)
         if isinstance(e, sqlite3.OperationalError) and "database is locked" in str(e):
