@@ -5,7 +5,7 @@
 PROJECT_ROOT := $(CURDIR)
 START_SCRIPT := $(PROJECT_ROOT)/scripts/start.sh
 HEADERS_HELPER := $(PROJECT_ROOT)/scripts/mcp-auth-headers.sh
-MCP_NAME ?= telegram
+MCP_NAME ?= telegram-mcp
 MCP_HOST ?= 127.0.0.1
 MCP_PORT ?= 8765
 HTTP_URL ?= http://$(MCP_HOST):$(MCP_PORT)/mcp
