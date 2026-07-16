@@ -6,18 +6,13 @@
 # Usage (Claude Code ~/.claude.json):
 #   "command": "/path/to/telegram-mcp/scripts/start.sh"
 #
-# NOTE: only used by the *stdio* transport, where the MCP client spawns this
-# script per connection. The default deployment uses an SSE daemon (launchd ->
-# launcher.sh) and this script is never spawned in that mode.
-#
 # SECURITY — least-privilege Keychain access (whitelist-friendly):
 #   Every Keychain call below is a SCOPED single-item read
 #   (`security find-generic-password -s <service>`); it touches only this
 #   project's own `telegram-*` items and NEVER `security dump-keychain`, which
 #   would read the attributes of every item across all apps. EDR tools (e.g.
 #   Bitdefender) that flag "security ... dump the Apple keychain" are reacting
-#   to dump-keychain — not present here. The single write (token bootstrap, far
-#   below) only adds this project's own `telegram-mcp-token`.
+#   to dump-keychain — not present here.
 #
 # First-time setup — store credentials in Keychain:
 #   security add-generic-password -a "$USER" -s telegram-api-id        -w "YOUR_API_ID"
@@ -57,12 +52,6 @@ if [[ -n "$_labels" ]]; then
       [[ -n "$_value" ]] && export "$_var=$_value"
     fi
   done
-fi
-
-if [[ -z "$TELEGRAM_MCP_TOKEN" ]]; then
-  TELEGRAM_MCP_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-  security add-generic-password -a "$USER" -s telegram-mcp-token -w "$TELEGRAM_MCP_TOKEN"
-  echo "[telegram-mcp] Generated and stored new SSE token in Keychain" >&2
 fi
 
 export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_STRING TELEGRAM_MCP_TOKEN

@@ -27,7 +27,7 @@ if [[ -z "\$TELEGRAM_MCP_TOKEN" ]]; then
   exit 1
 fi
 export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_STRING TELEGRAM_MCP_TOKEN
-exec "${UV_BIN}" --directory "${PROJECT_DIR}" run telegram-mcp --transport sse --port 8306
+exec "${UV_BIN}" --directory "${PROJECT_DIR}" run telegram-mcp --transport http --port 8765
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 
@@ -63,13 +63,12 @@ TOKEN="$(security find-generic-password -a "$USER" -s telegram-mcp-token -w 2>/d
 if [[ -z "$TOKEN" ]]; then
   TOKEN="$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")"
   security add-generic-password -a "$USER" -s telegram-mcp-token -w "$TOKEN"
-  echo "[telegram-mcp] Generated and stored SSE token in Keychain"
+  echo "[telegram-mcp] Generated and stored HTTP bearer token in Keychain"
 fi
 
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH"
 
-# Patch ~/.claude.json if telegram-mcp is registered there (stdio → SSE).
 CLAUDE_JSON="$HOME/.claude.json"
 if [[ -f "$CLAUDE_JSON" ]]; then
   python3 - "$CLAUDE_JSON" "$PROJECT_DIR" <<'PYEOF'
@@ -77,23 +76,21 @@ import json, sys
 path, project_dir = sys.argv[1], sys.argv[2]
 with open(path) as f:
     d = json.load(f)
-servers = d.get("mcpServers", {})
-if "telegram-mcp" in servers:
-    servers["telegram-mcp"] = {
-        "type": "sse",
-        "url": "http://127.0.0.1:8306/sse",
-        "headersHelper": f"{project_dir}/scripts/mcp-auth-headers.sh",
-    }
-    with open(path, "w") as f:
-        json.dump(d, f, indent=2, ensure_ascii=False)
-    print("[telegram-mcp] ~/.claude.json updated to SSE mode — restart Claude Code to apply")
-else:
-    print("[telegram-mcp] ~/.claude.json has no telegram-mcp entry — skipping auto-patch")
-    print("               Add it manually if needed (see SETUP.md § SSE 步驟四)")
+servers = d.setdefault("mcpServers", {})
+servers["telegram-mcp"] = {
+    "type": "http",
+    "url": "http://127.0.0.1:8765/mcp",
+    "headersHelper": f"{project_dir}/scripts/mcp-auth-headers.sh",
+}
+with open(path, "w") as f:
+    json.dump(d, f, indent=2, ensure_ascii=False)
+print("[telegram-mcp] ~/.claude.json updated to Streamable HTTP mode — restart Claude Code to apply")
 PYEOF
+else
+  echo "[telegram-mcp] ~/.claude.json not found — start Claude Code once, then run scripts/install-launchd.sh again"
 fi
 
-echo "[telegram-mcp] LaunchAgent installed and server started on port 8306"
+echo "[telegram-mcp] LaunchAgent installed and Streamable HTTP server started on http://127.0.0.1:8765/mcp"
 echo "[telegram-mcp] To check status: launchctl list | grep telegram-mcp"
 echo "[telegram-mcp] To stop:   launchctl unload ~/Library/LaunchAgents/com.telegram-mcp.server.plist"
 echo "[telegram-mcp] To start:  launchctl load   ~/Library/LaunchAgents/com.telegram-mcp.server.plist"

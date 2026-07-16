@@ -2,7 +2,7 @@
 
 每位成員需要用**自己的** Telegram 帳號完成以下步驟。Session 綁定個人帳號，不能共用。
 
-**推薦方式：SSE 模式**。一個常駐 server 在本機執行，所有 IDE 透過 HTTP 共用同一條 session，避免多個 IDE 同時啟動時互相衝突。設定完成後在 `~/.claude.json` 全域登記一次，所有專案均可使用，不需要在各專案中重複設定 `.mcp.json`。
+**推薦方式：Streamable HTTP 模式**。一個 server 在本機執行，所有 IDE 透過 HTTP 共用同一條 session，避免多個 IDE 同時啟動時互相衝突。預設用 `bash scripts/setup.sh` 安裝並在 Claude user scope 登記一次，所有專案均可使用，不需要在各專案中重複設定 `.mcp.json`。
 
 > 若不想 clone 本專案，可改用[備用：stdio 模式](#備用stdio-模式)，但同一台機器上多個 IDE 同時使用時會有 session 衝突問題。
 
@@ -31,7 +31,9 @@ cd telegram-mcp
 
 <!-- -->
 
-> **一鍵設定（步驟一至五）：** clone 完成後直接執行 `bash scripts/setup.sh`。script 會自動安裝缺少的 uv、引導你完成憑證輸入、安裝 launchd 服務並設定 `~/.claude.json`，完成後重啟 Claude Code 即可。以下步驟說明各階段的細節供參考。
+> **預設安裝方式：** clone 完成後可直接執行 `bash scripts/setup.sh`。script 會安裝缺少的 uv、引導你完成 Telegram 憑證與 session string、安裝 launchd 常駐 Streamable HTTP server，並把 Claude user-scope MCP 設定指向 `http://127.0.0.1:8765/mcp`。
+>
+> **常用指令：** 可執行 `make list` 查看所有 Makefile 指令。HTTP 模式用 `make start` 或 `make start-http` 前景啟動 server，再用 `make use-http` 將 Claude MCP 設定切到 `http://127.0.0.1:8765/mcp`。
 
 ---
 
@@ -83,11 +85,41 @@ uv run telegram-mcp-generate-session
 
 ---
 
-## 步驟三：存入 macOS Keychain
+## 步驟三：設定本機環境
 
-SSE 常駐服務在開機後自動從 Keychain 載入 Telegram 憑證（`api_id`、`api_hash`、`session_string`）。**這三項憑證不會寫入任何 config 檔**。
+若要使用預設一鍵安裝，可從這裡直接執行：
 
-> **SSE bearer token 說明：** `install-launchd.sh` 會另外產生一個本機服務鑑權 token（與上述 Telegram 憑證無關），並將其存入 Keychain（`telegram-mcp-token`）。`~/.claude.json` 使用 `headersHelper` 欄位指向專案內的 `scripts/mcp-auth-headers.sh`，Claude Code 在每次連線時執行該腳本即時讀取，**token 不會寫入任何設定檔**。
+```bash
+bash scripts/setup.sh
+```
+
+這會自動完成 Keychain 寫入、launchd Streamable HTTP 常駐服務安裝，以及 Claude user-scope MCP 設定。以下手動設定只在不使用 `setup.sh` 時需要。
+
+如果你已經把 Telegram 憑證存入 macOS Keychain，並且下列三個 item 都存在，HTTP / SSE / stdio 的 Makefile 啟動指令會自動讀取它們，不需要在 `.env` 填寫 Telegram 憑證：
+
+```bash
+security find-generic-password -a "$USER" -s telegram-api-id -w >/dev/null
+security find-generic-password -a "$USER" -s telegram-api-hash -w >/dev/null
+security find-generic-password -a "$USER" -s telegram-session-string -w >/dev/null
+```
+
+如果尚未使用 Keychain，才需要複製 `.env.example`，把 Telegram 憑證寫進 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+`.env` 明文方式至少需要設定：
+
+```env
+TELEGRAM_API_ID=你的api_id
+TELEGRAM_API_HASH=你的api_hash
+TELEGRAM_SESSION_STRING=你的session_string
+```
+
+建議使用 Keychain，避免把憑證寫進 `.env`。**不要把 session string commit 到 git。**
+
+Keychain 寫入範例：
 
 ```bash
 security add-generic-password -a "$USER" -s telegram-api-id        -w "你的api_id"
@@ -103,118 +135,149 @@ security find-generic-password -a "$USER" -s telegram-api-hash -w
 security find-generic-password -a "$USER" -s telegram-session-string -w
 ```
 
+在 shell 中匯出：
+
+```bash
+export TELEGRAM_API_ID=$(security find-generic-password -a "$USER" -s telegram-api-id -w)
+export TELEGRAM_API_HASH=$(security find-generic-password -a "$USER" -s telegram-api-hash -w)
+export TELEGRAM_SESSION_STRING=$(security find-generic-password -a "$USER" -s telegram-session-string -w)
+```
+
 ---
 
-## 步驟四：安裝 launchd 常駐服務
+## 步驟四：啟動 Streamable HTTP server
 
-在專案目錄內執行：
+預設常駐安裝使用 launchd：
 
 ```bash
 bash scripts/install-launchd.sh
 ```
 
-script 自動完成：
+這會啟動 Streamable HTTP server：
 
-1. 產生 bearer token 並存入 Keychain（`telegram-mcp-token`）
-2. 在 `~/Library/LaunchAgents/` 建立 `com.telegram-mcp.server.plist`
-3. 立即載入並啟動 server 在 `127.0.0.1:8306`
-4. 若 `~/.claude.json` 中已有 `telegram-mcp` entry，自動將其從 stdio 改為 SSE 模式
+```text
+http://127.0.0.1:8765/mcp
+```
 
-確認 server 已啟動（有 `data:` 開頭的串流輸出即正常）：
+如需前景模式除錯，在專案目錄內執行：
 
 ```bash
-curl -s http://127.0.0.1:8306/sse \
-  -H "Authorization: Bearer $(security find-generic-password -a "$USER" -s telegram-mcp-token -w)"
+make start
 ```
+
+`make start` 等同於 `make start-http`，會以前景模式啟動：
+
+```bash
+MCP_HOST=127.0.0.1 ./scripts/start.sh --transport http --port 8765
+```
+
+前景模式的 Streamable HTTP endpoint 同樣是：
+
+```text
+http://127.0.0.1:8765/mcp
+```
+
+> 預設只綁定 `127.0.0.1`。不要把未加認證的 MCP endpoint 暴露到公開網路。
 
 ---
 
-## 步驟五：設定 ~/.claude.json
+## 步驟五：切換 Claude MCP 設定
 
-> **推薦：直接使用 `bash scripts/setup.sh`**，會自動完成此步驟（包含設定 headersHelper、清理舊進程、驗證 SSE）。
-> 以下為手動 fallback，僅在不使用 `setup.sh` 時參考。
+若你是執行 `bash scripts/setup.sh` 或 `bash scripts/install-launchd.sh`，script 已經把 `~/.claude.json` 設為 Streamable HTTP；此步驟只需用 `make config-check` 或 `claude mcp list` 確認。
 
-`install-launchd.sh` 已自動產生 bearer token（存於 Keychain `telegram-mcp-token`）。
-
-若 script 在步驟四成功 patch 了 `~/.claude.json`（輸出 `~/.claude.json updated to SSE mode`），此步驟**跳過**，直接重啟 Claude Code 即可。
-
-若 script 輸出 `~/.claude.json has no telegram-mcp entry — skipping auto-patch`，表示 `~/.claude.json` 中尚無此 entry，需手動加入。
-
-先取得專案的絕對路徑：
+使用 Makefile 指令管理 Claude Code 的 user-scope MCP registration：
 
 ```bash
-pwd   # 在專案根目錄執行，複製輸出的路徑
+# 檢查目前 Claude MCP 設定
+make config-check
+
+# 切到 Streamable HTTP
+make use-http
+
+# 如需回到 stdio
+make use-stdio
+
+# 如需回到 legacy SSE
+make use-sse
 ```
 
-在 `~/.claude.json` 的 `mcpServers` 物件中加入（將 `/path/to/telegram-mcp` 換成上面的路徑）：
+`make use-http` 會執行等效的 Claude CLI 設定：
 
-```json
-"telegram-mcp": {
-  "type": "sse",
-  "url": "http://127.0.0.1:8306/sse",
-  "headersHelper": "/path/to/telegram-mcp/scripts/mcp-auth-headers.sh"
-}
+```bash
+claude mcp add --transport http --scope user telegram http://127.0.0.1:8765/mcp
 ```
 
-`headersHelper` 在每次連線時由 Claude Code 執行，即時從 Keychain 讀取 token，**token 不會寫入設定檔**。
+`make use-stdio` 會把 registration 改回由 Claude 啟動本專案：
+
+```bash
+claude mcp add --scope user telegram -- "/path/to/telegram-mcp/scripts/start.sh" --transport stdio
+```
+
+`make use-sse` 會把 `~/.claude.json` 的 user-scope MCP 設定改成 legacy SSE，並使用 `scripts/mcp-auth-headers.sh` 從 Keychain 讀取 bearer token。
 
 完全結束 Claude Code（**所有視窗**）後重新開啟即生效。
 
 ---
 
-## 管理常駐服務
+## Makefile 指令
 
 ```bash
-# 查看狀態（正常會顯示 PID）
-launchctl list | grep telegram-mcp
+make list          # 顯示所有指令
+make start         # 前景啟動 HTTP mode，同 make start-http
+make start-http    # 前景啟動 Streamable HTTP mode
+make start-sse     # 前景啟動 legacy SSE mode
+make start-stdio   # 前景啟動 stdio mode
 
-# 停止
-launchctl unload ~/Library/LaunchAgents/com.telegram-mcp.server.plist
-
-# 啟動
-launchctl load ~/Library/LaunchAgents/com.telegram-mcp.server.plist
-
-# 查看錯誤日誌
-tail -f ~/Library/Logs/telegram-mcp/server.err.log
+make config-check  # 顯示目前 Claude MCP 設定
+make use-http      # 切 Claude MCP config 到 Streamable HTTP
+make use-sse       # 切 Claude MCP config 到 legacy SSE
+make use-stdio     # 切 Claude MCP config 回 stdio
 ```
 
-SSE server 只在**本機**監聽（`127.0.0.1:8306`），不會暴露到網路。
+可覆寫變數：
+
+```bash
+make start-http MCP_PORT=9000
+make use-http MCP_NAME=telegram-mcp HTTP_URL=http://127.0.0.1:9000/mcp
+make use-sse MCP_NAME=telegram-mcp SSE_URL=http://127.0.0.1:9000/sse
+```
 
 ---
 
-## 從 stdio 升級到 SSE 模式
+## 從 stdio 升級到 Streamable HTTP 模式
 
-若你之前用 stdio 模式，現在想切換到 SSE：
+若你之前用 stdio 模式，現在想切換到 Streamable HTTP：
 
 ```bash
-bash scripts/setup.sh
+make start
 ```
 
-script 是 idempotent 的，重跑會：
+另開一個 terminal：
 
-1. 沿用 Keychain 中已有的憑證（不會重新驗證手機）
-2. 安裝/重啟 launchd SSE server
-3. 把 `~/.claude.json` 全域 `mcpServers.telegram-mcp` 改為 SSE
-4. **清理舊的 stdio zombie 進程**（切換前 Claude Code 啟動的 stdio process 不會自動回收）
-5. 警告任何專案層級的 `telegram-mcp` 覆蓋（會 shadow 全域 SSE 設定）
+```bash
+make use-http
+```
 
-完成後完全結束 Claude Code（所有視窗）再重新開啟。
+完成後完全結束 Claude Code（所有視窗）再重新開啟。切換前 Claude Code 啟動的 stdio process 不一定會自動回收；若看到舊進程殘留，確認 `make config-check` 已指向 HTTP 後再手動清理。
 
 ---
 
 ## 伺服器環境設定（.env）
 
-SSE 常駐服務在啟動時載入專案目錄的 `.env`。需要調整以下功能時，在 `.env` 中加入對應的變數（複製 `.env.example` 作為起點）：
+Server 啟動時會載入專案目錄的 `.env`。需要調整以下功能時，在 `.env` 中加入對應的變數（複製 `.env.example` 作為起點）：
 
 ```bash
 cp .env.example .env
 ```
 
-修改 `.env` 後需重新啟動服務才會生效：
+修改 `.env` 後需重新啟動 server 才會生效。
+
+HTTP / SSE transport 相關設定：
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.telegram-mcp.server.plist
-launchctl load  ~/Library/LaunchAgents/com.telegram-mcp.server.plist
+MCP_TRANSPORT=http
+MCP_HOST=127.0.0.1
+MCP_PORT=8765
 ```
 
 > stdio 模式使用者：在 `.mcp.json` 的 `env` 區塊加入對應變數即可，不需要 `.env` 檔。
@@ -350,7 +413,7 @@ TELEGRAM_PROXY_SECRET=<hex secret>
 claude mcp list
 ```
 
-看到 `telegram-mcp` 出現且狀態正常即完成。也可以直接問 Claude「幫我查看我的 Telegram 帳號資訊」，Claude 應該能回傳你的帳號名稱。
+看到 `telegram`（或你用 `MCP_NAME=...` 指定的名稱）出現且狀態正常即完成。也可以直接問 Claude「幫我查看我的 Telegram 帳號資訊」，Claude 應該能回傳你的帳號名稱。
 
 ---
 
@@ -367,7 +430,7 @@ security delete-generic-password -a "$USER" -s telegram-session-string
 security add-generic-password -a "$USER" -s telegram-session-string -w "新的session_string"
 ```
 
-替換後重啟 launchd 服務。
+替換後重啟目前執行中的 server（例如停止後重跑 `make start`）。
 
 **Q: 可以在多台電腦使用同一個 session string 嗎？**
 A: **不行**。Telegram MTProto 的 session string 綁定到單一連線 — 兩台電腦同時使用同一個 session，Telegram 會立即撤銷它，兩邊都斷線。
@@ -383,20 +446,20 @@ A: **不行**。Telegram MTProto 的 session string 綁定到單一連線 — �
 **Q: MCP server 啟動後看到 `Tool disabled: delete_message` 的訊息？**
 A: 這是正常行為，代表危險工具保護機制正在運作。若需要啟用，參考上方「工具存取控制」章節。
 
-**Q: install-launchd.sh 說 `~/.claude.json` 沒有 telegram-mcp entry？**
-A: 執行 script 前 `~/.claude.json` 中還沒有 `telegram-mcp`，所以 script 跳過自動修改。改用 `bash scripts/setup.sh` 會自動建立 entry，或按照步驟五手動填入。
+**Q: `make config-check` 顯示尚未 registered？**
+A: 代表 Claude user-scope 還沒有這個 MCP server。先確認 HTTP server 已用 `make start` 啟動，再執行 `make use-http`。
 
-**Q: 切換到 SSE 後 `ps aux | grep telegram-mcp` 仍有多個進程？**
-A: 那些是切換前 Claude Code 啟動的 stdio process，不會自動回收。`setup.sh` 會自動清理；也可手動執行：
+**Q: 切換到 HTTP 後 `ps aux | grep telegram-mcp` 仍有多個進程？**
+A: 那些通常是切換前 Claude Code 啟動的 stdio process，不一定會自動回收。確認 `make config-check` 已指向 HTTP 後，可手動清理舊 stdio process：
 
 ```bash
 ps -axo pid,command | awk '$NF == "telegram-mcp" {print $1}' | xargs kill 2>/dev/null
 ```
 
-確認 `~/.claude.json` 已切換 SSE 後再殺，否則 Claude Code 會立刻 respawn。
+確認 Claude MCP config 已切到 HTTP 後再殺，否則 Claude Code 可能會立刻 respawn。
 
 **Q: 某個專案無法看到 telegram-mcp 工具？**
-A: 該專案可能在 `~/.claude.json` 的 `projects.<path>.mcpServers` 有獨立 stdio 設定，覆蓋了全域 SSE 設定。檢查：
+A: 該專案可能在 `~/.claude.json` 的 `projects.<path>.mcpServers` 有獨立 stdio 設定，覆蓋了 user-scope HTTP 設定。檢查：
 
 ```bash
 python3 -c "
@@ -408,7 +471,7 @@ for p, v in d.get('projects', {}).items():
 "
 ```
 
-清理：`bash scripts/setup.sh --clean-project-overrides`
+若發現專案層級覆蓋，手動移除該 project entry，或重新用 `make use-http` 設定 user-scope registration。
 
 ---
 

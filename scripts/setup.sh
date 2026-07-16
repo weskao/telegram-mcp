@@ -8,8 +8,8 @@
 #   - Installs uv if missing
 #   - Prompts for Telegram API ID, API Hash, and phone verification (session string)
 #   - Stores all credentials in macOS Keychain
-#   - Installs and starts the launchd SSE server
-#   - Patches ~/.claude.json for SSE mode
+#   - Installs and starts the launchd Streamable HTTP server
+#   - Patches ~/.claude.json for Streamable HTTP mode
 #
 # Required user input (interactive prompts):
 #   - Telegram API ID and API Hash (from https://my.telegram.org/apps)
@@ -122,7 +122,7 @@ echo
 
 # ── Step 3: launchd service ───────────────────────────────────────────────────
 
-echo "步驟 3：安裝 launchd 常駐服務…"
+echo "步驟 3：安裝 Streamable HTTP launchd 常駐服務…"
 bash "$SCRIPT_DIR/install-launchd.sh"
 echo
 
@@ -145,24 +145,24 @@ with open(path) as f:
     d = json.load(f)
 servers = d.setdefault("mcpServers", {})
 servers["telegram-mcp"] = {
-    "type": "sse",
-    "url": "http://127.0.0.1:8306/sse",
+    "type": "http",
+    "url": "http://127.0.0.1:8765/mcp",
     "headersHelper": f"{project_dir}/scripts/mcp-auth-headers.sh",
 }
-# Detect project-level overrides that would shadow the global SSE config.
+# Detect project-level overrides that would shadow the global HTTP config.
 overrides = []
 for proj, val in d.get("projects", {}).items():
     if "telegram-mcp" in val.get("mcpServers", {}):
         overrides.append(proj)
 with open(path, "w") as f:
     json.dump(d, f, indent=2, ensure_ascii=False)
-print("  ✅ ~/.claude.json 全域 mcpServers 已設為 SSE 模式")
+print("  ✅ ~/.claude.json 全域 mcpServers 已設為 Streamable HTTP 模式")
 if overrides:
     print()
-    print("  ⚠️  以下專案有獨立的 telegram-mcp 設定，會覆蓋全域 SSE 設定：")
+    print("  ⚠️  以下專案有獨立的 telegram-mcp 設定，會覆蓋全域 HTTP 設定：")
     for p in overrides:
         print(f"       - {p}")
-    print("       要讓這些專案也用 SSE，請手動刪除上述專案的 telegram-mcp entry，")
+    print("       要讓這些專案也用 HTTP，請手動刪除上述專案的 telegram-mcp entry，")
     print("       或執行：  bash scripts/setup.sh --clean-project-overrides")
 PYEOF
 fi
@@ -194,9 +194,9 @@ PYEOF
 fi
 
 # ── Step 5: Clean up stale stdio processes ────────────────────────────────────
-# After switching to SSE, pre-existing stdio telegram-mcp processes (spawned by
+# After switching to HTTP, pre-existing stdio telegram-mcp processes (spawned by
 # Claude Code before the config change) become orphans. Since the new config
-# points to SSE, these won't be respawned after we kill them.
+# points to HTTP, these won't be respawned after we kill them.
 
 echo "步驟 5：清理舊的 stdio zombie 進程…"
 
@@ -210,9 +210,9 @@ else
 fi
 echo
 
-# ── Step 6: Verify SSE server ─────────────────────────────────────────────────
+# ── Step 6: Verify Streamable HTTP server ─────────────────────────────────────
 
-echo "步驟 6：驗證 SSE server…"
+echo "步驟 6：驗證 Streamable HTTP server…"
 if launchctl list | grep -q "com.telegram-mcp.server"; then
   PID=$(launchctl list | grep "com.telegram-mcp.server" | awk '{print $1}')
   if [[ "$PID" =~ ^[0-9]+$ ]]; then
@@ -231,5 +231,5 @@ echo "=== 設定完成 ==="
 echo
 echo "下一步："
 echo "  1. 完全結束 Claude Code（所有視窗），再重新開啟"
-echo "  2. 執行 'claude mcp list' 確認 telegram-mcp 已載入且為 SSE 模式"
+echo "  2. 執行 'claude mcp list' 確認 telegram-mcp 已載入且為 Streamable HTTP 模式"
 echo "  3. 在 Claude Code 中問「幫我查看我的 Telegram 帳號資訊」測試"
