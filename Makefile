@@ -13,7 +13,7 @@ SSE_URL ?= http://$(MCP_HOST):$(MCP_PORT)/sse
 CLAUDE ?= claude
 UV ?= uv
 
-.PHONY: list help start start-http start-sse start-stdio config-check use-http use-sse use-stdio
+.PHONY: list help start start-http start-sse start-stdio config-check use-http use-sse use-stdio sync-upstream-readme
 
 list:
 	@echo "Available commands:"
@@ -60,3 +60,10 @@ use-stdio: ## Switch Claude MCP config back to stdio
 	$(CLAUDE) mcp add --scope user $(MCP_NAME) -- "$(START_SCRIPT)" --transport stdio
 	@echo ""
 	@echo "Registered '$(MCP_NAME)' as stdio. Restart Claude Code to apply the change."
+
+sync-upstream-readme: ## Refresh README.upstream.md from upstream/main (never edit it by hand)
+	@git remote get-url upstream >/dev/null 2>&1 || { echo "No 'upstream' remote. Add it: git remote add upstream https://github.com/chigwell/telegram-mcp.git"; exit 1; }
+	@echo "Fetching upstream..."
+	@git fetch upstream
+	@git show upstream/main:README.md > README.upstream.md
+	@echo "README.upstream.md updated from upstream/main"
