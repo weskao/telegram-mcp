@@ -29,7 +29,7 @@ bash scripts/setup.sh
 
 ### 🚀 一鍵安裝與常駐 HTTP 服務
 
-- `bash scripts/setup.sh`：一次安裝並在 Claude user scope 登記，所有專案共用同一個 server，不需在各專案重複設定 `.mcp.json`。
+- `bash scripts/setup.sh`：一次安裝、將 bearer token 存入 Keychain，並把 Claude Code 與 Codex 設為連向同一個本機 HTTP server。
 - 預設 **Streamable HTTP** 常駐模式：整台機器只跑一個行程、共用一條 Telegram session，避免多個 IDE 同時啟動時 session 衝突。
 - `scripts/install-launchd.sh`：安裝 launchd 服務並開機自啟。
 
@@ -49,7 +49,7 @@ bash scripts/setup.sh
 ### 🛠️ 開發者便利工具
 
 - 繁體中文安裝指南 **[SETUP.md](SETUP.md)**。
-- Makefile 便利指令：`make start-http`、`make use-http`、`make use-stdio`、`make config-check`… 執行 `make list` 查看全部。
+- Makefile 便利指令：`make start-http`、`make use-http`、`make use-sse`、`make use-stdio`、`make config-check`… 執行 `make list` 查看全部。
 - SSE bearer 驗證輔助腳本 `scripts/mcp-auth-headers.sh`。
 
 ---

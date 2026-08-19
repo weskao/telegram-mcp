@@ -54,7 +54,9 @@ if [[ -n "$_labels" ]]; then
   done
 fi
 
-export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_STRING TELEGRAM_MCP_TOKEN
+for _credential in TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_STRING TELEGRAM_MCP_TOKEN; do
+  [[ -n "${!_credential}" ]] && export "$_credential"
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec uv --directory "$SCRIPT_DIR/.." run telegram-mcp "$@"

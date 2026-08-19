@@ -2,7 +2,7 @@
 
 每位成員需要用**自己的** Telegram 帳號完成以下步驟。Session 綁定個人帳號，不能共用。
 
-**推薦方式：Streamable HTTP 模式**。一個 server 在本機執行，所有 IDE 透過 HTTP 共用同一條 session，避免多個 IDE 同時啟動時互相衝突。預設用 `bash scripts/setup.sh` 安裝並在 Claude user scope 登記一次，所有專案均可使用，不需要在各專案中重複設定 `.mcp.json`。
+**推薦方式：Streamable HTTP 模式**。一個 server 在本機執行，Claude Code 與 Codex 透過 HTTP 共用同一條 session，避免多個 IDE 同時啟動時互相衝突。預設用 `bash scripts/setup.sh` 安裝並登記兩個 client，不需要在各專案中重複設定。
 
 > 若不想 clone 本專案，可改用[備用：stdio 模式](#備用stdio-模式)，但同一台機器上多個 IDE 同時使用時會有 session 衝突問題。
 
@@ -31,9 +31,9 @@ cd telegram-mcp
 
 <!-- -->
 
-> **預設安裝方式：** clone 完成後可直接執行 `bash scripts/setup.sh`。script 會安裝缺少的 uv、引導你完成 Telegram 憑證與 session string、安裝 launchd 常駐 Streamable HTTP server，並把 Claude user-scope MCP 設定指向 `http://127.0.0.1:8765/mcp`。
+> **預設安裝方式：** clone 完成後可直接執行 `bash scripts/setup.sh`。script 會安裝缺少的 uv、引導你完成 Telegram 憑證與 session string、安裝 launchd 常駐 Streamable HTTP server，並把 Claude Code 與 Codex MCP 設定指向 `http://127.0.0.1:8765/mcp`。
 >
-> **常用指令：** 可執行 `make list` 查看所有 Makefile 指令。HTTP 模式用 `make start` 或 `make start-http` 前景啟動 server，再用 `make use-http` 將 Claude MCP 設定切到 `http://127.0.0.1:8765/mcp`。
+> **常用指令：** 可執行 `make list` 查看所有 Makefile 指令。HTTP 模式用 `make start` 或 `make start-http` 前景啟動 server，再用 `make use-http` 將 Claude Code 與 Codex MCP 設定切到 `http://127.0.0.1:8765/mcp`。
 
 ---
 
@@ -93,7 +93,7 @@ uv run telegram-mcp-generate-session
 bash scripts/setup.sh
 ```
 
-這會自動完成 Keychain 寫入、launchd Streamable HTTP 常駐服務安裝，以及 Claude user-scope MCP 設定。以下手動設定只在不使用 `setup.sh` 時需要。
+這會自動完成 Keychain 寫入、launchd Streamable HTTP 常駐服務安裝，以及 Claude Code／Codex MCP 設定。以下手動設定只在不使用 `setup.sh` 時需要。
 
 如果你已經把 Telegram 憑證存入 macOS Keychain，並且下列三個 item 都存在，HTTP / SSE / stdio 的 Makefile 啟動指令會自動讀取它們，不需要在 `.env` 填寫 Telegram 憑證：
 
@@ -181,41 +181,45 @@ http://127.0.0.1:8765/mcp
 
 ---
 
-## 步驟五：切換 Claude MCP 設定
+## 步驟五：切換 MCP client 設定
 
-若你是執行 `bash scripts/setup.sh` 或 `bash scripts/install-launchd.sh`，script 已經把 `~/.claude.json` 設為 Streamable HTTP；此步驟只需用 `make config-check` 或 `claude mcp list` 確認。
+若你是執行 `bash scripts/setup.sh` 或 `bash scripts/install-launchd.sh`，script 已經把 Claude Code 與 Codex 設為 Streamable HTTP；此步驟只需用 `make config-check` 確認。
 
-使用 Makefile 指令管理 Claude Code 的 user-scope MCP registration：
+使用 Makefile 指令管理 MCP registration：
 
 ```bash
-# 檢查目前 Claude MCP 設定
+# 檢查目前 Claude Code 與 Codex MCP 設定
 make config-check
 
-# 切到 Streamable HTTP
+# 兩個 client 都切到 Streamable HTTP
 make use-http
 
-# 如需回到 stdio
-make use-stdio
-
-# 如需回到 legacy SSE
+# Claude Code 切到 legacy SSE（Codex 不支援 SSE）
 make use-sse
+
+# 兩個 client 都切回 stdio
+make use-stdio
 ```
 
-`make use-http` 會執行等效的 Claude CLI 設定：
+`make use-http` 會設定：
 
 ```bash
-claude mcp add --transport http --scope user telegram http://127.0.0.1:8765/mcp
+claude mcp add-json --scope user telegram-mcp '{"type":"http","url":"http://127.0.0.1:8765/mcp","headersHelper":"/path/to/telegram-mcp/scripts/mcp-auth-headers.sh"}'
+codex mcp add telegram-mcp --url http://127.0.0.1:8765/mcp --bearer-token-env-var TELEGRAM_MCP_TOKEN
 ```
 
-`make use-stdio` 會把 registration 改回由 Claude 啟動本專案：
+Claude Code 用 `headersHelper` 於連線時從 Keychain 讀取 bearer token；Codex 使用 `TELEGRAM_MCP_TOKEN`。安裝腳本會將該 Keychain token 設到使用者 launchd 環境，因此重新啟動後的 Codex 可取得它，不會把 token 寫進設定檔。
+
+`make use-stdio` 會把兩個 client 的 registration 改回由 client 啟動本專案：
 
 ```bash
-claude mcp add --scope user telegram -- "/path/to/telegram-mcp/scripts/start.sh" --transport stdio
+claude mcp add --scope user telegram-mcp -- "/path/to/telegram-mcp/scripts/start.sh" --transport stdio
+codex mcp add telegram-mcp -- "/path/to/telegram-mcp/scripts/start.sh" --transport stdio
 ```
 
-`make use-sse` 會把 `~/.claude.json` 的 user-scope MCP 設定改成 legacy SSE，並使用 `scripts/mcp-auth-headers.sh` 從 Keychain 讀取 bearer token。
+`make use-sse` 只會把 Claude Code 設為 legacy SSE，並使用 `scripts/mcp-auth-headers.sh` 從 Keychain 讀取 bearer token。現有 Codex CLI 原生只支援 Streamable HTTP URL 與 stdio，不能直接設定 SSE；切換 SSE 時 Codex 設定保持不變。
 
-完全結束 Claude Code（**所有視窗**）後重新開啟即生效。
+完全結束 Claude Code／Codex（**所有視窗**）後重新開啟即生效。
 
 ---
 
@@ -228,10 +232,10 @@ make start-http    # 前景啟動 Streamable HTTP mode
 make start-sse     # 前景啟動 legacy SSE mode
 make start-stdio   # 前景啟動 stdio mode
 
-make config-check  # 顯示目前 Claude MCP 設定
-make use-http      # 切 Claude MCP config 到 Streamable HTTP
-make use-sse       # 切 Claude MCP config 到 legacy SSE
-make use-stdio     # 切 Claude MCP config 回 stdio
+make config-check  # 顯示目前 Claude Code 與 Codex MCP 設定
+make use-http      # 兩個 client 切到 Streamable HTTP
+make use-sse       # Claude Code 切到 legacy SSE；Codex 維持原設定
+make use-stdio     # 兩個 client 切回 stdio
 ```
 
 可覆寫變數：

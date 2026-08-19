@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot setup: prerequisites → credentials → Keychain → launchd → ~/.claude.json
+# One-shot setup: prerequisites → credentials → Keychain → launchd → MCP clients
 #
 # Usage:
 #   bash scripts/setup.sh
@@ -9,7 +9,7 @@
 #   - Prompts for Telegram API ID, API Hash, and phone verification (session string)
 #   - Stores all credentials in macOS Keychain
 #   - Installs and starts the launchd Streamable HTTP server
-#   - Patches ~/.claude.json for Streamable HTTP mode
+#   - Registers Claude Code and Codex for authenticated Streamable HTTP
 #
 # Required user input (interactive prompts):
 #   - Telegram API ID and API Hash (from https://my.telegram.org/apps)
@@ -126,51 +126,16 @@ echo "步驟 3：安裝 Streamable HTTP launchd 常駐服務…"
 bash "$SCRIPT_DIR/install-launchd.sh"
 echo
 
-# ── Step 4: ~/.claude.json ────────────────────────────────────────────────────
+# ── Step 4: MCP clients ──────────────────────────────────────────────────────
 
-echo "步驟 4：設定 ~/.claude.json…"
-
-TOKEN="$(_kc_get telegram-mcp-token)"
-CLAUDE_JSON="$HOME/.claude.json"
-
-if [[ -z "$TOKEN" ]]; then
-  echo "  ⚠️  無法從 Keychain 讀到 telegram-mcp-token，請確認步驟 3 執行成功"
-elif [[ ! -f "$CLAUDE_JSON" ]]; then
-  echo "  ⚠️  ~/.claude.json 不存在，請先啟動 Claude Code 一次再執行本 script"
-else
-  python3 - "$CLAUDE_JSON" "$PROJECT_DIR" <<'PYEOF'
-import json, sys
-path, project_dir = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    d = json.load(f)
-servers = d.setdefault("mcpServers", {})
-servers["telegram-mcp"] = {
-    "type": "http",
-    "url": "http://127.0.0.1:8765/mcp",
-    "headersHelper": f"{project_dir}/scripts/mcp-auth-headers.sh",
-}
-# Detect project-level overrides that would shadow the global HTTP config.
-overrides = []
-for proj, val in d.get("projects", {}).items():
-    if "telegram-mcp" in val.get("mcpServers", {}):
-        overrides.append(proj)
-with open(path, "w") as f:
-    json.dump(d, f, indent=2, ensure_ascii=False)
-print("  ✅ ~/.claude.json 全域 mcpServers 已設為 Streamable HTTP 模式")
-if overrides:
-    print()
-    print("  ⚠️  以下專案有獨立的 telegram-mcp 設定，會覆蓋全域 HTTP 設定：")
-    for p in overrides:
-        print(f"       - {p}")
-    print("       要讓這些專案也用 HTTP，請手動刪除上述專案的 telegram-mcp entry，")
-    print("       或執行：  bash scripts/setup.sh --clean-project-overrides")
-PYEOF
-fi
+echo "步驟 4：確認 Claude Code 與 Codex MCP 設定…"
+make -C "$PROJECT_DIR" config-check
 echo
 
 # Optional flag: clean up project-level telegram-mcp overrides
 if [[ "${1:-}" == "--clean-project-overrides" ]]; then
   echo "清理專案層級 telegram-mcp 覆蓋…"
+  CLAUDE_JSON="$HOME/.claude.json"
   python3 - "$CLAUDE_JSON" <<'PYEOF'
 import json, sys
 path = sys.argv[1]
@@ -230,6 +195,6 @@ echo
 echo "=== 設定完成 ==="
 echo
 echo "下一步："
-echo "  1. 完全結束 Claude Code（所有視窗），再重新開啟"
-echo "  2. 執行 'claude mcp list' 確認 telegram-mcp 已載入且為 Streamable HTTP 模式"
-echo "  3. 在 Claude Code 中問「幫我查看我的 Telegram 帳號資訊」測試"
+echo "  1. 完全結束 Claude Code 與 Codex，再重新開啟"
+echo "  2. 執行 'make config-check' 確認兩個 client 都已載入 Streamable HTTP"
+echo "  3. 在任一 client 中問「幫我查看我的 Telegram 帳號資訊」測試"

@@ -1,4 +1,4 @@
-# Makefile - local development and Claude MCP convenience commands.
+# Makefile - local development and MCP client convenience commands.
 
 .DEFAULT_GOAL := list
 
@@ -11,9 +11,11 @@ MCP_PORT ?= 8765
 HTTP_URL ?= http://$(MCP_HOST):$(MCP_PORT)/mcp
 SSE_URL ?= http://$(MCP_HOST):$(MCP_PORT)/sse
 CLAUDE ?= claude
+CODEX ?= codex
+CODEX_BEARER_ENV ?= TELEGRAM_MCP_TOKEN
 UV ?= uv
 
-.PHONY: list help start start-http start-sse start-stdio config-check use-http use-sse use-stdio sync-upstream-readme
+.PHONY: list help start start-http start-sse start-stdio config-check config-check-claude config-check-codex use-http use-http-claude use-http-codex use-sse use-sse-claude use-stdio use-stdio-claude use-stdio-codex sync-upstream-readme
 
 list:
 	@echo "Available commands:"
@@ -34,32 +36,60 @@ start-sse: ## Run legacy SSE mode in foreground at http://127.0.0.1:8765/sse
 start-stdio: ## Run stdio mode in foreground
 	"$(START_SCRIPT)" --transport stdio
 
-config-check: ## Show current Claude user-scope MCP config for telegram
-	@$(CLAUDE) mcp get $(MCP_NAME) || echo "($(MCP_NAME) not yet registered with Claude)"
+config-check: config-check-claude config-check-codex ## Show current Claude and Codex MCP config for telegram
 
-use-http: ## Switch Claude MCP config to Streamable HTTP
+config-check-claude: ## Show current Claude user-scope MCP config
+	@if command -v "$(CLAUDE)" >/dev/null 2>&1; then $(CLAUDE) mcp get $(MCP_NAME) || echo "($(MCP_NAME) not yet registered with Claude)"; else echo "Claude CLI not found — skipping"; fi
+
+config-check-codex: ## Show current Codex MCP config
+	@if command -v "$(CODEX)" >/dev/null 2>&1; then $(CODEX) mcp get $(MCP_NAME) || echo "($(MCP_NAME) not yet registered with Codex)"; else echo "Codex CLI not found — skipping"; fi
+
+use-http: use-http-claude use-http-codex ## Switch Claude and Codex MCP config to Streamable HTTP
+
+use-http-claude: ## Switch Claude MCP config to authenticated Streamable HTTP
 	@echo "Removing existing '$(MCP_NAME)' MCP registration (if any)..."
 	@$(CLAUDE) mcp remove --scope user $(MCP_NAME) >/dev/null 2>&1 || true
 	@echo "Registering '$(MCP_NAME)' via Streamable HTTP at $(HTTP_URL) ..."
-	$(CLAUDE) mcp add --transport http --scope user $(MCP_NAME) $(HTTP_URL)
+	$(CLAUDE) mcp add-json --scope user $(MCP_NAME) '{"type":"http","url":"$(HTTP_URL)","headersHelper":"$(HEADERS_HELPER)"}'
 	@echo ""
 	@echo "Registered '$(MCP_NAME)' as Streamable HTTP. Restart Claude Code to apply the change."
 
-use-sse: ## Switch Claude MCP config to legacy SSE
+use-http-codex: ## Switch Codex MCP config to authenticated Streamable HTTP
+	@echo "Removing existing '$(MCP_NAME)' Codex MCP registration (if any)..."
+	@$(CODEX) mcp remove $(MCP_NAME) >/dev/null 2>&1 || true
+	@echo "Registering '$(MCP_NAME)' via Streamable HTTP at $(HTTP_URL) ..."
+	$(CODEX) mcp add $(MCP_NAME) --url "$(HTTP_URL)" --bearer-token-env-var "$(CODEX_BEARER_ENV)"
+	@echo ""
+	@echo "Registered '$(MCP_NAME)' for Codex. Restart Codex after the launchd service is running."
+
+use-sse: use-sse-claude ## Switch Claude MCP config to legacy SSE (Codex does not support SSE)
+	@echo "Codex supports Streamable HTTP and stdio, not legacy SSE; its configuration was not changed."
+
+use-sse-claude: ## Switch Claude MCP config to authenticated legacy SSE
 	@echo "Removing existing '$(MCP_NAME)' MCP registration (if any)..."
 	@$(CLAUDE) mcp remove --scope user $(MCP_NAME) >/dev/null 2>&1 || true
 	@echo "Registering '$(MCP_NAME)' via legacy SSE at $(SSE_URL) ..."
-	@MCP_NAME="$(MCP_NAME)" SSE_URL="$(SSE_URL)" HEADERS_HELPER="$(HEADERS_HELPER)" python3 -c 'import json, os, pathlib; path = pathlib.Path.home() / ".claude.json"; data = json.loads(path.read_text()) if path.exists() else {}; servers = data.setdefault("mcpServers", {}); servers[os.environ["MCP_NAME"]] = {"type": "sse", "url": os.environ["SSE_URL"], "headersHelper": os.environ["HEADERS_HELPER"]}; path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")'
+	$(CLAUDE) mcp add-json --scope user $(MCP_NAME) '{"type":"sse","url":"$(SSE_URL)","headersHelper":"$(HEADERS_HELPER)"}'
 	@echo ""
 	@echo "Registered '$(MCP_NAME)' as legacy SSE. Restart Claude Code to apply the change."
 
-use-stdio: ## Switch Claude MCP config back to stdio
+use-stdio: use-stdio-claude use-stdio-codex ## Switch Claude and Codex MCP config to stdio
+
+use-stdio-claude: ## Switch Claude MCP config back to stdio
 	@echo "Removing existing '$(MCP_NAME)' MCP registration (if any)..."
 	@$(CLAUDE) mcp remove --scope user $(MCP_NAME) >/dev/null 2>&1 || true
 	@echo "Registering '$(MCP_NAME)' via stdio from $(PROJECT_ROOT) ..."
 	$(CLAUDE) mcp add --scope user $(MCP_NAME) -- "$(START_SCRIPT)" --transport stdio
 	@echo ""
 	@echo "Registered '$(MCP_NAME)' as stdio. Restart Claude Code to apply the change."
+
+use-stdio-codex: ## Switch Codex MCP config back to stdio
+	@echo "Removing existing '$(MCP_NAME)' Codex MCP registration (if any)..."
+	@$(CODEX) mcp remove $(MCP_NAME) >/dev/null 2>&1 || true
+	@echo "Registering '$(MCP_NAME)' via stdio from $(PROJECT_ROOT) ..."
+	$(CODEX) mcp add $(MCP_NAME) -- "$(START_SCRIPT)" --transport stdio
+	@echo ""
+	@echo "Registered '$(MCP_NAME)' as stdio. Restart Codex to apply the change."
 
 sync-upstream-readme: ## Refresh README.upstream.md from upstream/main (never edit it by hand)
 	@git remote get-url upstream >/dev/null 2>&1 || { echo "No 'upstream' remote. Add it: git remote add upstream https://github.com/chigwell/telegram-mcp.git"; exit 1; }

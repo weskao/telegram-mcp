@@ -27,6 +27,7 @@ if [[ -z "\$TELEGRAM_MCP_TOKEN" ]]; then
   exit 1
 fi
 export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_STRING TELEGRAM_MCP_TOKEN
+launchctl setenv TELEGRAM_MCP_TOKEN "\$TELEGRAM_MCP_TOKEN"
 exec "${UV_BIN}" --directory "${PROJECT_DIR}" run telegram-mcp --transport http --port 8765
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
@@ -66,31 +67,19 @@ if [[ -z "$TOKEN" ]]; then
   echo "[telegram-mcp] Generated and stored HTTP bearer token in Keychain"
 fi
 
+# Codex's Streamable HTTP configuration reads the bearer token from its process
+# environment. Publish the Keychain-backed value to the GUI launchd domain so
+# Codex instances started after this installer inherit it; the token is never
+# written to Codex configuration.
+launchctl setenv TELEGRAM_MCP_TOKEN "$TOKEN"
+
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH"
 
-CLAUDE_JSON="$HOME/.claude.json"
-if [[ -f "$CLAUDE_JSON" ]]; then
-  python3 - "$CLAUDE_JSON" "$PROJECT_DIR" <<'PYEOF'
-import json, sys
-path, project_dir = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    d = json.load(f)
-servers = d.setdefault("mcpServers", {})
-servers["telegram-mcp"] = {
-    "type": "http",
-    "url": "http://127.0.0.1:8765/mcp",
-    "headersHelper": f"{project_dir}/scripts/mcp-auth-headers.sh",
-}
-with open(path, "w") as f:
-    json.dump(d, f, indent=2, ensure_ascii=False)
-print("[telegram-mcp] ~/.claude.json updated to Streamable HTTP mode — restart Claude Code to apply")
-PYEOF
-else
-  echo "[telegram-mcp] ~/.claude.json not found — start Claude Code once, then run scripts/install-launchd.sh again"
-fi
+make -C "$PROJECT_DIR" use-http
 
 echo "[telegram-mcp] LaunchAgent installed and Streamable HTTP server started on http://127.0.0.1:8765/mcp"
+echo "[telegram-mcp] Claude and Codex MCP registrations set to Streamable HTTP — restart both clients to apply"
 echo "[telegram-mcp] To check status: launchctl list | grep telegram-mcp"
 echo "[telegram-mcp] To stop:   launchctl unload ~/Library/LaunchAgents/com.telegram-mcp.server.plist"
 echo "[telegram-mcp] To start:  launchctl load   ~/Library/LaunchAgents/com.telegram-mcp.server.plist"
