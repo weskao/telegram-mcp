@@ -10,12 +10,69 @@ except UnsafeInstallationError as exc:
     raise SystemExit(str(exc)) from None
 
 from telegram_mcp import runtime
+from telethon.errors import AuthKeyDuplicatedError
 from telegram_mcp.runtime import *
+from telegram_mcp.singleton import (
+    DEFAULT_GRACE_SECONDS,
+    SessionLock,
+    SessionLockError,
+    session_identity,
+)
 import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
+
+# Populated as each account's session lock is acquired; released in _main's
+# finally block so a lock is never held past this process's lifetime.
+_session_locks: dict[str, SessionLock] = {}
+
+
+def _lock_grace_seconds() -> float:
+    raw = os.getenv("TELEGRAM_LOCK_GRACE_SECONDS")
+    if not raw:
+        return DEFAULT_GRACE_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        return DEFAULT_GRACE_SECONDS
 
 
 async def _connect_authorized_client(label, client) -> None:
-    await client.connect()
+    # First, prevent our own duplicate-spawn case outright: an exclusive
+    # per-session lock means a second instance of this server never even
+    # attempts to connect while another instance already holds the same
+    # session (see telegram_mcp/singleton.py for why and how).
+    lock = SessionLock(label, session_identity(client))
+    await asyncio.to_thread(lock.acquire, grace_seconds=_lock_grace_seconds())
+    _session_locks[label] = lock
+
+    # Once we hold the lock, still tolerate a transient AuthKeyDuplicatedError
+    # from Telegram itself (e.g. the same session briefly seen from two IPs
+    # during a VPN reconnect) with a bounded retry, since that's not caused by
+    # a second instance of this server and a blip shouldn't take the server
+    # down. Give each concurrent client its own session (TELEGRAM_SESSION_STRINGS
+    # pool or TELEGRAM_SESSION_STRING_<LABEL>) to avoid the collision entirely.
+    max_attempts = 4
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await client.connect()
+            break
+        except AuthKeyDuplicatedError:
+            if attempt >= max_attempts:
+                raise
+            delay = min(2**attempt, 15)
+            print(
+                f"AuthKeyDuplicatedError connecting '{label}' (attempt "
+                f"{attempt}/{max_attempts}): session in use from another IP. "
+                f"Retrying in {delay}s. If this persists, give each concurrent "
+                "client its own session via TELEGRAM_SESSION_STRINGS or "
+                "TELEGRAM_SESSION_STRING_<LABEL>.",
+                file=sys.stderr,
+            )
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            await asyncio.sleep(delay)
+
     if await client.is_user_authorized():
         return
 
@@ -25,6 +82,28 @@ async def _connect_authorized_client(label, client) -> None:
         "session string with `uv run session_string_generator.py`, then set "
         "TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_STRING_<LABEL> in .env. "
         "For existing file sessions, run the login outside the MCP server first."
+    )
+
+
+def _configure_transport_security() -> None:
+    """Wire MCP_ALLOWED_HOSTS/MCP_ALLOWED_ORIGINS into FastMCP's DNS-rebinding
+    protection, e.g. when the server sits behind a reverse proxy on a public
+    domain instead of only being reached via 127.0.0.1/localhost.
+    """
+    raw_hosts = os.getenv("MCP_ALLOWED_HOSTS", "")
+    allowed_hosts = [h.strip() for h in raw_hosts.split(",") if h.strip()]
+    if not allowed_hosts:
+        return
+
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    raw_origins = os.getenv("MCP_ALLOWED_ORIGINS", "")
+    allowed_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
+
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
     )
 
 
@@ -41,6 +120,9 @@ async def _serve(transport: str) -> None:
     if transport in ("http", "sse"):
         # Fork: run our own uvicorn so both HTTP transports go through
         # BearerTokenMiddleware (upstream serves them unauthenticated).
+        mcp.settings.host = os.getenv("MCP_HOST", "127.0.0.1")
+        mcp.settings.port = int(os.getenv("MCP_PORT", str(runtime._sse_port)))
+        _configure_transport_security()
         token = os.getenv("TELEGRAM_MCP_TOKEN", "")
         if not token:
             print(
@@ -52,8 +134,9 @@ async def _serve(transport: str) -> None:
         app = mcp.streamable_http_app() if transport == "http" else mcp.sse_app()
         if token:
             app = BearerTokenMiddleware(app, token)
-        host = os.getenv("MCP_HOST", "127.0.0.1")
-        config = uvicorn.Config(app, host=host, port=runtime._sse_port, log_level="warning")
+        config = uvicorn.Config(
+            app, host=mcp.settings.host, port=mcp.settings.port, log_level="warning"
+        )
         server = uvicorn.Server(config)
         await server.serve()
     else:
@@ -97,6 +180,15 @@ async def _main() -> None:
                 "Database lock detected. Please ensure no other instances are running.",
                 file=sys.stderr,
             )
+        elif isinstance(e, SessionLockError):
+            print(
+                "Another instance of this MCP server already holds this Telegram "
+                "session (e.g. the client restarted the connector without the old "
+                "process exiting yet). This instance is exiting instead of "
+                "connecting a second time, which would risk Telegram invalidating "
+                "the session for both. Retry once the other instance is gone.",
+                file=sys.stderr,
+            )
         sys.exit(1)
     finally:
         try:
@@ -105,6 +197,9 @@ async def _main() -> None:
             )
         except Exception:
             pass
+        for lock in _session_locks.values():
+            lock.release()
+        _session_locks.clear()
 
 
 def main() -> None:
@@ -113,10 +208,6 @@ def main() -> None:
     # exposure mode are complementary — apply both before serving.
     _apply_tool_disable_list()
     _apply_exposed_tools_mode()
-    # nest_asyncio is only needed for the stdio path's nested asyncio.run; the
-    # SSE path runs under uvicorn's own event loop and must not be patched.
-    if runtime._transport == "stdio":
-        nest_asyncio.apply()
     asyncio.run(_main())
 
 
