@@ -28,7 +28,13 @@ if [[ -z "\$TELEGRAM_MCP_TOKEN" ]]; then
 fi
 export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_STRING TELEGRAM_MCP_TOKEN
 launchctl setenv TELEGRAM_MCP_TOKEN "\$TELEGRAM_MCP_TOKEN"
-exec "${UV_BIN}" --directory "${PROJECT_DIR}" run telegram-mcp --transport http --port 8765
+"${UV_BIN}" --directory "${PROJECT_DIR}" run telegram-mcp --transport http --port 8765 &
+SERVER_PID=\$!
+for i in \$(seq 1 60); do
+  nc -z 127.0.0.1 8765 2>/dev/null && { echo "[telegram-mcp] Port 8765 is up (attempt \$i)." >&2; break; }
+  sleep 0.5
+done
+wait "\$SERVER_PID"
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 
