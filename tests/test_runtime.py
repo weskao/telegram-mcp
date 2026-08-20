@@ -829,6 +829,25 @@ def test_main_compatibility_wrappers_are_exported():
     assert main.log_file_path.endswith("mcp_errors.log")
 
 
+@pytest.fixture(autouse=True)
+def _restore_roots_globals():
+    """Snapshot the module-level roots globals around every test.
+
+    ``_configure_allowed_roots_from_cli`` mutates ``_transport`` and
+    ``SERVER_ALLOWED_ROOTS`` process-wide, and with MCP_TRANSPORT=http exported
+    that leaked "http" into later tests and silently short-circuited six of
+    them. Order-dependent failures like that are worse than the bug they hide.
+    """
+    saved_transport = runtime._transport
+    saved_roots = list(runtime.SERVER_ALLOWED_ROOTS)
+    saved_reported = runtime._roots_transport_reported
+    yield
+    runtime._transport = saved_transport
+    runtime.SERVER_ALLOWED_ROOTS = saved_roots
+    runtime._roots_transport_reported = saved_reported
+    main.SERVER_ALLOWED_ROOTS = saved_roots
+
+
 class _FakeRootsSession:
     def __init__(self, roots):
         self._roots = roots
@@ -1002,3 +1021,193 @@ async def test_list_roots_unexpected_error_denies_without_opt_in(tmp_path, monke
     )
     assert status == runtime.ROOTS_STATUS_ERROR
     assert roots == []
+
+
+class _RecordingRootsSession:
+    """Records whether the server ever issued the server->client roots request."""
+
+    def __init__(self):
+        self.called = False
+
+    async def list_roots(self):
+        self.called = True
+        return SimpleNamespace(roots=[])
+
+
+class _SilentRootsSession:
+    """A client that accepts the roots request and never answers it."""
+
+    async def list_roots(self):
+        await asyncio.Event().wait()
+
+
+def _stateless_http(monkeypatch):
+    monkeypatch.setattr(runtime, "_transport", "http")
+    monkeypatch.setattr(runtime.mcp.settings, "stateless_http", True)
+
+
+@pytest.mark.asyncio
+async def test_stateless_http_uses_server_roots_without_asking_client(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    _stateless_http(monkeypatch)
+    session = _RecordingRootsSession()
+
+    roots, status = await runtime._get_effective_allowed_roots_with_status(
+        SimpleNamespace(session=session)
+    )
+
+    assert roots == [root.resolve()]
+    assert status == runtime.ROOTS_STATUS_TRANSPORT_FALLBACK
+    # The point of the transport check: never pay the timeout for a request
+    # this transport can never deliver an answer to.
+    assert session.called is False
+
+
+@pytest.mark.asyncio
+async def test_stateless_http_without_server_roots_reports_not_configured(monkeypatch):
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [])
+    _stateless_http(monkeypatch)
+    session = _RecordingRootsSession()
+
+    roots, status = await runtime._get_effective_allowed_roots_with_status(
+        SimpleNamespace(session=session)
+    )
+
+    assert roots == []
+    assert status == runtime.ROOTS_STATUS_TRANSPORT_UNAVAILABLE
+    assert session.called is False
+
+
+@pytest.mark.asyncio
+async def test_stateful_transport_still_asks_the_client(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.setattr(runtime, "_transport", "http")
+    monkeypatch.setattr(runtime.mcp.settings, "stateless_http", False)
+    session = _RecordingRootsSession()
+
+    await runtime._get_effective_allowed_roots_with_status(SimpleNamespace(session=session))
+
+    assert session.called is True
+
+
+@pytest.mark.asyncio
+async def test_silent_client_times_out_instead_of_hanging(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.setattr(runtime, "ROOTS_REQUEST_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(runtime, "_transport", "sse")
+    monkeypatch.delenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", raising=False)
+
+    roots, status = await asyncio.wait_for(
+        runtime._get_effective_allowed_roots_with_status(
+            SimpleNamespace(session=_SilentRootsSession())
+        ),
+        timeout=5,
+    )
+
+    assert roots == []
+    assert status == runtime.ROOTS_STATUS_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_silent_client_falls_back_to_server_roots_when_enabled(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.setattr(runtime, "ROOTS_REQUEST_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(runtime, "_transport", "sse")
+    monkeypatch.setenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", "1")
+
+    roots, status = await asyncio.wait_for(
+        runtime._get_effective_allowed_roots_with_status(
+            SimpleNamespace(session=_SilentRootsSession())
+        ),
+        timeout=5,
+    )
+
+    assert roots == [root.resolve()]
+    assert status == runtime.ROOTS_STATUS_SERVER_FALLBACK
+
+
+@pytest.mark.asyncio
+async def test_timeout_error_message_names_cause_and_remedy(monkeypatch):
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [])
+    monkeypatch.setattr(runtime, "ROOTS_REQUEST_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(runtime, "_transport", "sse")
+
+    roots, error = await asyncio.wait_for(
+        runtime._ensure_allowed_roots(SimpleNamespace(session=_SilentRootsSession()), "send_file"),
+        timeout=5,
+    )
+
+    assert roots == []
+    assert "send_file" in error
+    assert "did not answer" in error
+    assert "TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK" in error
+
+
+@pytest.mark.asyncio
+async def test_stateless_http_respects_explicit_fallback_opt_out(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    _stateless_http(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", "0")
+
+    roots, status = await runtime._get_effective_allowed_roots_with_status(
+        SimpleNamespace(session=_RecordingRootsSession())
+    )
+
+    assert roots == []
+    assert status == runtime.ROOTS_STATUS_TRANSPORT_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_unset_fallback_is_consent_but_garbage_is_not_an_opt_out(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    _stateless_http(monkeypatch)
+
+    monkeypatch.delenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", raising=False)
+    _, unset_status = await runtime._get_effective_allowed_roots_with_status(
+        SimpleNamespace(session=_RecordingRootsSession())
+    )
+    monkeypatch.setenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", "banana")
+    _, garbage_status = await runtime._get_effective_allowed_roots_with_status(
+        SimpleNamespace(session=_RecordingRootsSession())
+    )
+
+    assert unset_status == runtime.ROOTS_STATUS_TRANSPORT_FALLBACK
+    assert garbage_status == runtime.ROOTS_STATUS_TRANSPORT_FALLBACK
+
+
+@pytest.mark.asyncio
+async def test_transport_error_message_does_not_advise_client_roots(monkeypatch):
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [])
+    _stateless_http(monkeypatch)
+
+    roots, error = await runtime._ensure_allowed_roots(
+        SimpleNamespace(session=_RecordingRootsSession()), "send_file"
+    )
+
+    assert roots == []
+    # The generic wording tells the operator to provide "client MCP Roots",
+    # which is precisely what this transport cannot deliver.
+    assert "and/or client MCP Roots" not in error
+    assert "server" in error and "CLI roots" in error
+
+
+def test_roots_timeout_env_override_rejects_unusable_values():
+    assert runtime._parse_float_env(None, 10.0) == 10.0
+    assert runtime._parse_float_env("", 10.0) == 10.0
+    assert runtime._parse_float_env("2.5", 10.0) == 2.5
+    # A misconfigured timeout must not silently become "no timeout".
+    assert runtime._parse_float_env("0", 10.0) == 10.0
+    assert runtime._parse_float_env("-1", 10.0) == 10.0
+    assert runtime._parse_float_env("banana", 10.0) == 10.0

@@ -279,6 +279,21 @@ def _get_proxy_env(name: str, label: str) -> Optional[str]:
     return os.getenv(f"TELEGRAM_PROXY_{name}") or None
 
 
+def _parse_float_env(value: Optional[str], default: float) -> float:
+    """Positive float from an env var; anything unusable keeps the default.
+
+    A misconfigured timeout must not become "no timeout" -- that is the failure
+    this budget exists to prevent.
+    """
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
 def _parse_bool_env(value: Optional[str], default: bool) -> bool:
     if value is None:
         return default
@@ -702,6 +717,25 @@ ROOTS_STATUS_UNSUPPORTED_FALLBACK = "unsupported_fallback"
 ROOTS_STATUS_CLIENT_DENY_ALL = "client_deny_all"
 ROOTS_STATUS_SERVER_FALLBACK = "server_fallback"
 ROOTS_STATUS_ERROR = "error"
+ROOTS_STATUS_TIMEOUT = "timeout"
+ROOTS_STATUS_TRANSPORT_FALLBACK = "transport_fallback"
+ROOTS_STATUS_TRANSPORT_UNAVAILABLE = "transport_unavailable"
+
+# A client that never answers the Roots request must not stall the tool call
+# forever. Transports that structurally cannot deliver the request are detected
+# up front (see _client_roots_channel_unavailable), so this budget only ever
+# applies to a client that accepted the request and went quiet — 10s is generous
+# for a local round-trip while still failing inside a normal tool-call budget.
+# Env var name matches upstream PR #165, which fixes the same hang with a
+# timeout alone; the default differs because the structural case no longer
+# reaches here.
+ROOTS_REQUEST_TIMEOUT_SECONDS = _parse_float_env(
+    os.getenv("TELEGRAM_ROOTS_REQUEST_TIMEOUT_SECONDS"), 10.0
+)
+
+# The transport can only become unusable once per process, so say it once
+# instead of on every file-path call.
+_roots_transport_reported = False
 
 
 # Error code prefix mapping for better error tracing
@@ -1652,6 +1686,49 @@ def _server_roots_fallback_enabled(value: Optional[str] = None) -> bool:
     return _parse_bool_env(raw_value, False)
 
 
+def _server_roots_fallback_explicitly_disabled(value: Optional[str] = None) -> bool:
+    """Whether the operator explicitly turned the server-roots fallback off.
+
+    Distinct from ``not _server_roots_fallback_enabled()``: unset means "no
+    preference expressed", which some branches read as consent, while an
+    explicit false is a decision that must not be overridden. An unparseable
+    value is not treated as an explicit "off".
+    """
+    raw_value = (
+        os.getenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK") if value is None else value
+    )
+    if raw_value is None:
+        return False
+    # Only recognised negatives count. _parse_bool_env maps anything it does not
+    # recognise to False, so inverting it would read a typo as a deliberate "off".
+    return raw_value.strip().lower() in {"0", "false", "no", "off"}
+
+
+def _client_roots_channel_unavailable() -> Optional[str]:
+    """Reason why this transport cannot carry a server->client request, if any.
+
+    Stateless streamable HTTP builds a fresh transport per HTTP request, so the
+    transport handling a tool call has no standalone SSE stream of its own.
+    ``ServerSession.list_roots()`` sends its request without a
+    ``related_request_id`` (unlike ``elicit`` / ``create_message``, which pass
+    one), so it is routed to that missing stream and dropped -- the server logs
+    "Request stream _GET_stream not found" and the await never completes. It is
+    not slow here, it is unanswerable, so detect the shape up front and fall
+    back the way we do for a client that declares no Roots capability, instead
+    of paying ``ROOTS_REQUEST_TIMEOUT_SECONDS`` on every file-path call.
+
+    Verified against mcp 1.29.0. If a future SDK gives stateless HTTP a route
+    for unrelated server->client requests, drop this check -- the tests here
+    monkeypatch the flags and would not catch that on their own.
+    """
+    if _transport == "http" and getattr(mcp.settings, "stateless_http", False):
+        return (
+            "stateless streamable HTTP transport cannot carry server->client "
+            "requests"
+        )
+    return None
+
+
 async def _get_effective_allowed_roots_with_status(
     ctx: Optional[Context],
 ) -> tuple[List[Path], str]:
@@ -1661,8 +1738,44 @@ async def _get_effective_allowed_roots_with_status(
             return fallback_roots, ROOTS_STATUS_READY
         return [], ROOTS_STATUS_NOT_CONFIGURED
 
+    unavailable_reason = _client_roots_channel_unavailable()
+    if unavailable_reason:
+        global _roots_transport_reported
+        if not _roots_transport_reported:
+            _roots_transport_reported = True
+            # logger is pinned to ERROR for production, so anything quieter is
+            # invisible exactly where this matters.
+            logger.error(
+                "Client MCP Roots are unreachable (%s); file-path tools depend "
+                "on server CLI roots here.",
+                unavailable_reason,
+            )
+        if fallback_roots and not _server_roots_fallback_explicitly_disabled():
+            return fallback_roots, ROOTS_STATUS_TRANSPORT_FALLBACK
+        return [], ROOTS_STATUS_TRANSPORT_UNAVAILABLE
+
     try:
-        list_roots_result = await ctx.session.list_roots()
+        list_roots_result = await asyncio.wait_for(
+            ctx.session.list_roots(), timeout=ROOTS_REQUEST_TIMEOUT_SECONDS
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        # Reached only when the transport looked capable but the client stayed
+        # silent. Requiring the explicit opt-in here matches the treatment of
+        # other unexpected failures: a silent client is not evidence that
+        # server-side roots were intended to apply.
+        if fallback_roots and _server_roots_fallback_enabled():
+            logger.warning(
+                "MCP roots request timed out after %ss; falling back to server "
+                "CLI roots (TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK).",
+                ROOTS_REQUEST_TIMEOUT_SECONDS,
+            )
+            return fallback_roots, ROOTS_STATUS_SERVER_FALLBACK
+        logger.error(
+            "MCP roots request timed out after %ss; disabling file-path tools "
+            "for safety.",
+            ROOTS_REQUEST_TIMEOUT_SECONDS,
+        )
+        return [], ROOTS_STATUS_TIMEOUT
     except Exception as error:
         recovered_roots = _coerce_paths_from_list_roots_validation_error(error)
         if recovered_roots:
@@ -1729,6 +1842,27 @@ async def _ensure_allowed_roots(
                 (
                     f"{tool_name} is disabled because MCP Roots could not be verified safely. "
                     "Check MCP client/server logs."
+                ),
+            )
+        if status == ROOTS_STATUS_TRANSPORT_UNAVAILABLE:
+            return (
+                [],
+                (
+                    f"{tool_name} is disabled: "
+                    f"{_client_roots_channel_unavailable() or 'client MCP Roots are unreachable'}, "
+                    "so client MCP Roots cannot be requested on this transport. Pass server "
+                    "CLI roots when starting the server, and leave "
+                    "TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK unset or true."
+                ),
+            )
+        if status == ROOTS_STATUS_TIMEOUT:
+            return (
+                [],
+                (
+                    f"{tool_name} is disabled because the MCP client did not answer the "
+                    f"Roots request within {ROOTS_REQUEST_TIMEOUT_SECONDS}s. Pass server "
+                    "CLI roots and set TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1, or use a "
+                    "transport whose client can answer Roots requests."
                 ),
             )
         return (
