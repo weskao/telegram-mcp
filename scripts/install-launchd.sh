@@ -12,6 +12,62 @@ mkdir -p "$(dirname "$LAUNCHER")"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 UV_BIN="$(command -v uv)"
 
+# Allowed roots for file-path tools (send_file, download_media, ...).
+#
+# Stateless streamable HTTP builds a fresh transport per HTTP request, so the
+# server cannot ask the client for its MCP Roots: that request is routed to a
+# stream the tool call's transport does not have, and is dropped. Server-side
+# roots are the only source under this transport, and without them every
+# file-path tool stays disabled.
+#
+# Deliberately empty by default. These roots apply to every client that reaches
+# the server, so the operator names them explicitly rather than inheriting a
+# tree that happens to contain credentials, signing keys or the server's own
+# Telegram session file.
+#
+#   TELEGRAM_MCP_ALLOWED_ROOTS="/path/one:/path/two" bash scripts/install-launchd.sh
+#
+# Colon-separated so paths may contain spaces. The choice is remembered in
+# ROOTS_FILE, so a later re-install without the variable keeps it instead of
+# silently disabling the file-path tools again.
+ROOTS_FILE="$(dirname "$LAUNCHER")/allowed-roots"
+ALLOWED_ROOTS=()
+# `|| [[ -n "$_root" ]]` because the last field carries no trailing newline:
+# read returns non-zero at EOF and the loop body would skip it, silently
+# dropping the only root when just one is given.
+if [[ -n "${TELEGRAM_MCP_ALLOWED_ROOTS:-}" ]]; then
+  while IFS= read -r _root || [[ -n "$_root" ]]; do
+    [[ -n "$_root" ]] && ALLOWED_ROOTS+=("$_root")
+  done < <(printf '%s' "$TELEGRAM_MCP_ALLOWED_ROOTS" | tr ':' '\n')
+elif [[ -f "$ROOTS_FILE" ]]; then
+  while IFS= read -r _root || [[ -n "$_root" ]]; do
+    [[ -n "$_root" ]] && ALLOWED_ROOTS+=("$_root")
+  done < "$ROOTS_FILE"
+fi
+
+# Fail here rather than let launchd crash-loop a server whose roots do not
+# resolve — KeepAlive would retry it every ThrottleInterval seconds while this
+# script has already printed success.
+for _root in ${ALLOWED_ROOTS+"${ALLOWED_ROOTS[@]}"}; do
+  if [[ ! -d "$_root" ]]; then
+    echo "[telegram-mcp] ERROR: allowed root is not a directory: $_root" >&2
+    exit 1
+  fi
+done
+
+ROOTS_ARGS=""
+for _root in ${ALLOWED_ROOTS+"${ALLOWED_ROOTS[@]}"}; do
+  # %q so the value cannot be re-expanded or re-split when launchd runs the
+  # generated launcher.
+  ROOTS_ARGS="$ROOTS_ARGS $(printf '%q' "$_root")"
+done
+
+mkdir -p "$(dirname "$ROOTS_FILE")"
+: > "$ROOTS_FILE"
+for _root in ${ALLOWED_ROOTS+"${ALLOWED_ROOTS[@]}"}; do
+  printf '%s\n' "$_root" >> "$ROOTS_FILE"
+done
+
 # Self-contained launcher — no files from ~/Documents/ are executed.
 # Credentials are loaded inline from Keychain; uv is called directly.
 cat > "$LAUNCHER" <<LAUNCHER_EOF
@@ -28,7 +84,7 @@ if [[ -z "\$TELEGRAM_MCP_TOKEN" ]]; then
 fi
 export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_STRING TELEGRAM_MCP_TOKEN
 launchctl setenv TELEGRAM_MCP_TOKEN "\$TELEGRAM_MCP_TOKEN"
-"${UV_BIN}" --directory "${PROJECT_DIR}" run telegram-mcp --transport http --port 8765 &
+"${UV_BIN}" --directory "${PROJECT_DIR}" run telegram-mcp --transport http --port 8765${ROOTS_ARGS} &
 SERVER_PID=\$!
 for i in \$(seq 1 60); do
   nc -z 127.0.0.1 8765 2>/dev/null && { echo "[telegram-mcp] Port 8765 is up (attempt \$i)." >&2; break; }
@@ -85,6 +141,13 @@ launchctl load "$PLIST_PATH"
 make -C "$PROJECT_DIR" use-http
 
 echo "[telegram-mcp] LaunchAgent installed and Streamable HTTP server started on http://127.0.0.1:8765/mcp"
+if [[ ${#ALLOWED_ROOTS[@]} -gt 0 ]]; then
+  echo "[telegram-mcp] File-path tools allowed roots:"
+  printf '[telegram-mcp]   %s\n' "${ALLOWED_ROOTS[@]}"
+else
+  echo "[telegram-mcp] File-path tools are DISABLED (no allowed roots)."
+  echo "[telegram-mcp] Enable with: TELEGRAM_MCP_ALLOWED_ROOTS=\"/path/one:/path/two\" bash scripts/install-launchd.sh"
+fi
 echo "[telegram-mcp] Claude and Codex MCP registrations set to Streamable HTTP — restart both clients to apply"
 echo "[telegram-mcp] To check status: launchctl list | grep telegram-mcp"
 echo "[telegram-mcp] To stop:   launchctl unload ~/Library/LaunchAgents/com.telegram-mcp.server.plist"
