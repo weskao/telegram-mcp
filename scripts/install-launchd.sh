@@ -29,16 +29,21 @@ UV_BIN="$(command -v uv)"
 #
 # Colon-separated so paths may contain spaces. The choice is remembered in
 # ROOTS_FILE, so a later re-install without the variable keeps it instead of
-# silently disabling the file-path tools again.
+# silently disabling the file-path tools again. Set the variable to an empty
+# string (as opposed to leaving it unset) to clear the saved roots.
 ROOTS_FILE="$(dirname "$LAUNCHER")/allowed-roots"
 ALLOWED_ROOTS=()
 # `|| [[ -n "$_root" ]]` because the last field carries no trailing newline:
 # read returns non-zero at EOF and the loop body would skip it, silently
 # dropping the only root when just one is given.
-if [[ -n "${TELEGRAM_MCP_ALLOWED_ROOTS:-}" ]]; then
-  while IFS= read -r _root || [[ -n "$_root" ]]; do
-    [[ -n "$_root" ]] && ALLOWED_ROOTS+=("$_root")
-  done < <(printf '%s' "$TELEGRAM_MCP_ALLOWED_ROOTS" | tr ':' '\n')
+if [[ -n "${TELEGRAM_MCP_ALLOWED_ROOTS+set}" ]]; then
+  # Variable was explicitly set, possibly to "" to clear the saved roots --
+  # distinct from unset below, which falls back to ROOTS_FILE.
+  if [[ -n "$TELEGRAM_MCP_ALLOWED_ROOTS" ]]; then
+    while IFS= read -r _root || [[ -n "$_root" ]]; do
+      [[ -n "$_root" ]] && ALLOWED_ROOTS+=("$_root")
+    done < <(printf '%s' "$TELEGRAM_MCP_ALLOWED_ROOTS" | tr ':' '\n')
+  fi
 elif [[ -f "$ROOTS_FILE" ]]; then
   while IFS= read -r _root || [[ -n "$_root" ]]; do
     [[ -n "$_root" ]] && ALLOWED_ROOTS+=("$_root")
