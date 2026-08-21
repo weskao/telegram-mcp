@@ -11,9 +11,10 @@ from telegram_mcp.tools import messages
 
 
 class _FakeClient:
-    def __init__(self, premium=True, rpc_error=None):
+    def __init__(self, premium=True, rpc_error=None, updates=None):
         self._premium = premium
         self._rpc_error = rpc_error
+        self._updates = updates if updates is not None else SimpleNamespace()
         self.requests = []
 
     async def get_me(self):
@@ -23,7 +24,7 @@ class _FakeClient:
         self.requests.append(request)
         if self._rpc_error is not None:
             raise self._rpc_error
-        return SimpleNamespace()
+        return self._updates
 
 
 def test_make_rich_input_routes_by_mode():
@@ -48,10 +49,13 @@ async def test_send_rich_without_premium_sends_nothing():
 
 @pytest.mark.asyncio
 async def test_send_rich_with_premium_sends_rich_request():
-    cl = _FakeClient(premium=True)
+    updates = SimpleNamespace(
+        updates=[runtime.types.UpdateMessageID(id=4242, random_id=1)],
+    )
+    cl = _FakeClient(premium=True, updates=updates)
     result = json.loads(await messages._send_rich(cl, "peer", "| a |", "rich", reply_to=5))
 
-    assert result == {"sent": True, "rich": True}
+    assert result == {"sent": True, "rich": True, "message_id": 4242}
     (req,) = cl.requests
     assert isinstance(req.rich_message, runtime.types.InputRichMessageMarkdown)
     assert req.reply_to.reply_to_msg_id == 5

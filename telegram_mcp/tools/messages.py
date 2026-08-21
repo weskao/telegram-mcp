@@ -347,7 +347,7 @@ async def _send_rich(cl, entity, text: str, parse_mode: str, reply_to: Optional[
     if not await account_is_premium(cl):
         return premium_required_result("send_message")
     try:
-        await cl(
+        updates = await cl(
             functions.messages.SendMessageRequest(
                 peer=entity,
                 message=text,
@@ -363,7 +363,10 @@ async def _send_rich(cl, entity, text: str, parse_mode: str, reply_to: Optional[
         if is_premium_rpc_error(e):
             return premium_required_result("send_message")
         raise
-    return json.dumps({"sent": True, "rich": True}, ensure_ascii=False)
+    return json.dumps(
+        {"sent": True, "rich": True, "message_id": updates_message_id(updates)},
+        ensure_ascii=False,
+    )
 
 
 async def _edit_rich(cl, entity, message_id: int, text: str, parse_mode: str):
@@ -419,8 +422,8 @@ async def send_message(
         entity = await resolve_entity(chat_id, cl)
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
             return await _send_rich(cl, entity, message, parse_mode.lower())
-        await cl.send_message(entity, message, parse_mode=parse_mode)
-        return "Message sent successfully."
+        sent = await cl.send_message(entity, message, parse_mode=parse_mode)
+        return f"Message sent successfully.{sent_ids_suffix(sent)}"
     except Exception as e:
         return log_and_format_error("send_message", e, chat_id=chat_id)
 
@@ -1108,16 +1111,18 @@ async def forward_message(
                     ids_to_forward = sibling_ids
                     expanded_from_album = True
 
-        await cl.forward_messages(to_entity, ids_to_forward, from_entity)
+        forwarded = await cl.forward_messages(to_entity, ids_to_forward, from_entity)
+        # Ids of the COPIES in to_chat, not the originals echoed back in the prose.
+        new_ids = sent_ids_suffix(forwarded)
         count = len(ids_to_forward) if isinstance(ids_to_forward, list) else 1
         if count == 1:
-            return f"Message {message_id} forwarded from {from_chat_id} to {to_chat_id}."
+            return f"Message {message_id} forwarded from {from_chat_id} to {to_chat_id}.{new_ids}"
         if expanded_from_album:
             return (
                 f"Album of {count} messages forwarded from {from_chat_id} "
-                f"to {to_chat_id} (auto-expanded from message {message_id})."
+                f"to {to_chat_id} (auto-expanded from message {message_id}).{new_ids}"
             )
-        return f"{count} messages forwarded from {from_chat_id} to {to_chat_id}."
+        return f"{count} messages forwarded from {from_chat_id} to {to_chat_id}.{new_ids}"
     except Exception as e:
         return log_and_format_error(
             "forward_message",
@@ -1168,8 +1173,11 @@ async def forward_messages(
         cl = get_client(account)
         from_entity = await resolve_entity(from_chat_id, cl)
         to_entity = await resolve_entity(to_chat_id, cl)
-        await cl.forward_messages(to_entity, list(message_ids), from_entity)
-        return f"{len(message_ids)} messages forwarded from " f"{from_chat_id} to {to_chat_id}."
+        forwarded = await cl.forward_messages(to_entity, list(message_ids), from_entity)
+        return (
+            f"{len(message_ids)} messages forwarded from "
+            f"{from_chat_id} to {to_chat_id}.{sent_ids_suffix(forwarded)}"
+        )
     except Exception as e:
         return log_and_format_error(
             "forward_messages",
@@ -1461,8 +1469,8 @@ async def reply_to_message(
         entity = await resolve_entity(chat_id, cl)
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
             return await _send_rich(cl, entity, text, parse_mode.lower(), reply_to=message_id)
-        await cl.send_message(entity, text, reply_to=message_id, parse_mode=parse_mode)
-        return f"Replied to message {message_id} in chat {chat_id}."
+        sent = await cl.send_message(entity, text, reply_to=message_id, parse_mode=parse_mode)
+        return f"Replied to message {message_id} in chat {chat_id}.{sent_ids_suffix(sent)}"
     except Exception as e:
         return log_and_format_error(
             "reply_to_message", e, chat_id=chat_id, message_id=message_id, text=text

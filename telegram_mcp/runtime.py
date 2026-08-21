@@ -987,6 +987,40 @@ def is_premium_rpc_error(error: Exception) -> bool:
     return "PREMIUM" in getattr(error, "message", str(error)).upper()
 
 
+def sent_ids_suffix(result: Any) -> str:
+    """Render the id(s) of what a send/forward call just produced.
+
+    Telethon returns the Message (or list of Messages) it created; every send tool
+    appends this so the caller can immediately reply_to / edit / pin / link what it
+    sent instead of re-fetching history to guess the id. Empty string when the
+    result carries no id, so a send never fails over its own reporting.
+    """
+    items = result if isinstance(result, (list, tuple)) else [result]
+    ids = [i for i in (getattr(m, "id", None) for m in items) if isinstance(i, int)]
+    if not ids:
+        return ""
+    if len(ids) == 1:
+        return f" (message_id: {ids[0]})"
+    return " (message_ids: " + ", ".join(str(i) for i in ids) + ")"
+
+
+def updates_message_id(updates: Any) -> Optional[int]:
+    """Dig the new message id out of the raw Updates a SendMessageRequest returns.
+
+    Raw requests (the rich-formatting path) hand back Updates, not a Message.
+    UpdateMessageID is the authoritative carrier; the UpdateNew*Message scan is the
+    fallback for peers where Telegram omits it.
+    """
+    for update in getattr(updates, "updates", None) or []:
+        if isinstance(update, types.UpdateMessageID):
+            return update.id
+    for update in getattr(updates, "updates", None) or []:
+        message_id = getattr(getattr(update, "message", None), "id", None)
+        if isinstance(message_id, int):
+            return message_id
+    return None
+
+
 _ALIASES_ENV = "TELEGRAM_ALIASES_FILE"
 # Pre-XDG location; read as a fallback so existing installs keep resolving, never written.
 _LEGACY_ALIASES_FILE = Path(__file__).resolve().parent.parent / "aliases.json"
