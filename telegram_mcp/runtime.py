@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import sys
 import json
@@ -291,7 +292,8 @@ def _parse_float_env(value: Optional[str], default: float) -> float:
         parsed = float(value)
     except ValueError:
         return default
-    return parsed if parsed > 0 else default
+    # inf/nan pass `> 0` but would silently remove the timeout they configure.
+    return parsed if math.isfinite(parsed) and parsed > 0 else default
 
 
 def _parse_bool_env(value: Optional[str], default: bool) -> bool:

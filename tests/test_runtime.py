@@ -1211,3 +1211,7 @@ def test_roots_timeout_env_override_rejects_unusable_values():
     assert runtime._parse_float_env("0", 10.0) == 10.0
     assert runtime._parse_float_env("-1", 10.0) == 10.0
     assert runtime._parse_float_env("banana", 10.0) == 10.0
+    # inf/nan pass a bare `> 0` check but would silently remove the timeout.
+    assert runtime._parse_float_env("inf", 10.0) == 10.0
+    assert runtime._parse_float_env("Infinity", 10.0) == 10.0
+    assert runtime._parse_float_env("nan", 10.0) == 10.0
