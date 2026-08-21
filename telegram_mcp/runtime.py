@@ -728,9 +728,14 @@ ROOTS_STATUS_TRANSPORT_UNAVAILABLE = "transport_unavailable"
 # up front (see _client_roots_channel_unavailable), so this budget only ever
 # applies to a client that accepted the request and went quiet — 10s is generous
 # for a local round-trip while still failing inside a normal tool-call budget.
-# Env var name matches upstream PR #165, which fixes the same hang with a
-# timeout alone; the default differs because the structural case no longer
-# reaches here.
+# Env var name matches upstream PR #165
+# (https://github.com/chigwell/telegram-mcp/pull/165), which fixes the same
+# hang with a timeout alone; the default differs because the structural case
+# no longer reaches here.
+# Review trigger: PR #165 is still OPEN (checked 2026-08-21). If it merges,
+# diff its timeout logic against this file — its default is 1s, ours is 10s —
+# and decide whether the transport-detection guard above still earns its keep
+# on top of whatever lands upstream.
 ROOTS_REQUEST_TIMEOUT_SECONDS = _parse_float_env(
     os.getenv("TELEGRAM_ROOTS_REQUEST_TIMEOUT_SECONDS"), 10.0
 )
