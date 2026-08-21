@@ -999,7 +999,10 @@ def sent_ids_suffix(result: Any) -> str:
     appends this so the caller can immediately reply_to / edit / pin / link what it
     sent instead of re-fetching history to guess the id. Empty string when the
     result carries no id, so a send never fails over its own reporting.
+    Controlled by TELEGRAM_SHOW_SENT_ID (default 1/true; set 0 to suppress).
     """
+    if not _parse_bool_env(os.getenv("TELEGRAM_SHOW_SENT_ID"), True):
+        return ""
     items = result if isinstance(result, (list, tuple)) else [result]
     ids = [i for i in (getattr(m, "id", None) for m in items) if isinstance(i, int)]
     if not ids:
