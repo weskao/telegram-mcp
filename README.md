@@ -30,8 +30,7 @@ bash scripts/setup.sh
 ### 🚀 一鍵安裝與常駐 HTTP 服務
 
 - `bash scripts/setup.sh`：一次安裝、將 bearer token 存入 Keychain，並把 Claude Code 與 Codex 設為連向同一個本機 HTTP server。
-- 預設 **Streamable HTTP** 常駐模式：整台機器只跑一個行程、共用一條 Telegram session，避免多個 IDE 同時啟動時 session 衝突。
-- `scripts/install-launchd.sh`：安裝 launchd 服務並開機自啟。
+- `scripts/install-launchd.sh`：安裝 launchd 服務並開機自啟，讓 HTTP server 常駐。
 
 ### 🔐 Keychain 優先的 Session 儲存
 
