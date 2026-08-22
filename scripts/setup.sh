@@ -9,7 +9,7 @@
 #   - Prompts for Telegram API ID, API Hash, and phone verification (session string)
 #   - Stores all credentials in macOS Keychain
 #   - Installs and starts the launchd Streamable HTTP server
-#   - Registers Claude Code and Codex for authenticated Streamable HTTP
+#   - Registers each installed Claude Code / Codex client for authenticated Streamable HTTP
 #
 # Required user input (interactive prompts):
 #   - Telegram API ID and API Hash (from https://my.telegram.org/apps)
@@ -47,29 +47,32 @@ fi
 # have on PATH yet — add it before probing so an existing install is found.
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
+if ! command -v curl &>/dev/null; then
+  echo "  ❌ curl 未找到，macOS 應內建 curl，請確認系統環境"
+  exit 1
+fi
+
 if ! command -v uv &>/dev/null; then
   echo "  安裝 uv…"
   # Prefer the Astral installer: it ships prebuilt binaries. Homebrew is a
   # fallback because a prefix without bottles for this macOS/arch (e.g. a
   # Rosetta /usr/local brew) builds rust and llvm from source for hours.
-  if curl -LsSf https://astral.sh/uv/install.sh | sh; then
-    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-  elif command -v brew &>/dev/null; then
-    brew install uv
+  if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+    if command -v brew &>/dev/null; then
+      brew install uv
+    else
+      echo "  ❌ uv 安裝失敗，且找不到 Homebrew 可作為備援"
+      exit 1
+    fi
   fi
+  hash -r
   if ! command -v uv &>/dev/null; then
-    echo "  ⚠️  uv 安裝完成但需要重新開啟 Terminal 後再執行本 script"
-    exit 0
+    echo "  ❌ uv installer 執行完成，但仍找不到 uv"
+    exit 1
   fi
   echo "  ✅ uv 已安裝 ($(uv --version))"
 else
   echo "  ✅ uv $(uv --version)"
-fi
-
-# curl (should always be present on macOS, but check anyway)
-if ! command -v curl &>/dev/null; then
-  echo "  ❌ curl 未找到，macOS 應內建 curl，請確認系統環境"
-  exit 1
 fi
 
 echo
@@ -133,7 +136,7 @@ echo
 
 # ── Step 4: MCP clients ──────────────────────────────────────────────────────
 
-echo "步驟 4：確認 Claude Code 與 Codex MCP 設定…"
+echo "步驟 4：確認已安裝的 Claude Code / Codex MCP 設定…"
 make -C "$PROJECT_DIR" config-check
 echo
 
@@ -189,18 +192,13 @@ MCP_URL="http://127.0.0.1:${MCP_PORT}/mcp"
 LOG_ERR="$HOME/Library/Logs/telegram-mcp/server.err.log"
 VERIFY_OK=1
 
-# 6a. launchd 是否註冊、是否真的有進程
-LAUNCHD_LINE="$(launchctl list | grep "com.telegram-mcp.server" || true)"
+# 6a. launchd 是否註冊
+LAUNCHD_LINE="$(launchctl list | awk '$3 == "com.telegram-mcp.server"' || true)"
 if [[ -z "$LAUNCHD_LINE" ]]; then
   echo "  ❌ launchd 服務未註冊，請重新執行 install-launchd.sh"
   VERIFY_OK=0
 else
-  SERVICE_PID="$(awk '{print $1}' <<<"$LAUNCHD_LINE")"
-  if [[ "$SERVICE_PID" =~ ^[0-9]+$ ]]; then
-    echo "  ✅ launchd 服務已啟動 (PID $SERVICE_PID)"
-  else
-    echo "  ⚠️  launchd 服務已註冊，但目前沒有執行中的進程"
-  fi
+  echo "  ✅ launchd 服務已註冊"
 fi
 
 # 6b. port 是否真的在監聽（服務可能註冊成功卻不斷崩潰重啟）
@@ -212,6 +210,14 @@ if [[ "$VERIFY_OK" == 1 ]]; then
   done
   if [[ "$PORT_UP" == 1 ]]; then
     echo "  ✅ Port $MCP_PORT 監聽中"
+    LAUNCHD_LINE="$(launchctl list | awk '$3 == "com.telegram-mcp.server"' || true)"
+    SERVICE_PID="$(awk '{print $1}' <<<"$LAUNCHD_LINE")"
+    if [[ "$SERVICE_PID" =~ ^[0-9]+$ ]]; then
+      echo "  ✅ launchd 服務已啟動 (PID $SERVICE_PID)"
+    else
+      echo "  ❌ Port $MCP_PORT 有服務，但不是執行中的 launchd 服務"
+      VERIFY_OK=0
+    fi
   else
     echo "  ❌ Port $MCP_PORT 在 20 秒內沒有起來"
     VERIFY_OK=0
@@ -229,11 +235,12 @@ if [[ "$VERIFY_OK" == 1 ]]; then
 
     CODE_NOAUTH="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$MCP_URL" \
       -X POST -H 'Content-Type: application/json' \
-      -H 'Accept: application/json, text/event-stream' -d "$INIT_BODY" || echo 000)"
+      -H 'Accept: application/json, text/event-stream' -d "$INIT_BODY" || true)"
     if [[ "$CODE_NOAUTH" == "401" ]]; then
       echo "  ✅ 未帶 token 正確回傳 401"
     else
-      echo "  ⚠️  未帶 token 預期 401，實際收到 $CODE_NOAUTH"
+      echo "  ❌ 未帶 token 預期 401，實際收到 $CODE_NOAUTH"
+      VERIFY_OK=0
     fi
 
     INIT_RESP="$(curl -s --max-time 15 "$MCP_URL" -X POST \
@@ -277,9 +284,14 @@ if [[ "$VERIFY_OK" == 1 ]]; then
   echo "=== 設定完成 ==="
   echo
   echo "下一步："
-  echo "  1. 完全結束 Claude Code 與 Codex，再重新開啟"
-  echo "  2. 執行 'make config-check' 確認兩個 client 都已載入 Streamable HTTP"
-  echo "  3. 在任一 client 中問「幫我查看我的 Telegram 帳號資訊」測試"
+  if command -v claude &>/dev/null || command -v codex &>/dev/null; then
+    echo "  1. 完全結束已安裝的 Claude Code / Codex，再重新開啟"
+    echo "  2. 執行 'make config-check' 確認已安裝的 client 已載入 Streamable HTTP"
+    echo "  3. 在任一 client 中問「幫我查看我的 Telegram 帳號資訊」測試"
+  else
+    echo "  目前未偵測到 Claude Code 或 Codex CLI；server 已就緒，但尚無 client 註冊。"
+    echo "  安裝 client 後執行 'make use-http-claude' 或 'make use-http-codex'。"
+  fi
 else
   echo "=== 設定尚未完成 ==="
   echo

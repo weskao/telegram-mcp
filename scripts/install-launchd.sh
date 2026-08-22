@@ -153,7 +153,7 @@ else
   echo "[telegram-mcp] File-path tools are DISABLED (no allowed roots)."
   echo "[telegram-mcp] Enable with: TELEGRAM_MCP_ALLOWED_ROOTS=\"/path/one:/path/two\" bash scripts/install-launchd.sh"
 fi
-echo "[telegram-mcp] Claude and Codex MCP registrations set to Streamable HTTP — restart both clients to apply"
+echo "[telegram-mcp] Installed MCP clients were configured for Streamable HTTP; missing CLIs were skipped with follow-up commands above"
 echo "[telegram-mcp] To check status: launchctl list | grep telegram-mcp"
 echo "[telegram-mcp] To stop:   launchctl unload ~/Library/LaunchAgents/com.telegram-mcp.server.plist"
 echo "[telegram-mcp] To start:  launchctl load   ~/Library/LaunchAgents/com.telegram-mcp.server.plist"

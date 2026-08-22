@@ -183,7 +183,7 @@ http://127.0.0.1:8765/mcp
 
 ## 步驟五：切換 MCP client 設定
 
-若你是執行 `bash scripts/setup.sh` 或 `bash scripts/install-launchd.sh`，script 已經把 Claude Code 與 Codex 設為 Streamable HTTP；此步驟只需用 `make config-check` 確認。
+若你是執行 `bash scripts/setup.sh` 或 `bash scripts/install-launchd.sh`，script 會分別偵測 Claude Code 與 Codex，並把已安裝的 client 設為 Streamable HTTP。未安裝的 client 會被跳過，並顯示安裝後應執行的註冊命令；此步驟可用 `make config-check` 確認。
 
 使用 Makefile 指令管理 MCP registration：
 

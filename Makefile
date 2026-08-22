@@ -39,23 +39,27 @@ start-stdio: ## Run stdio mode in foreground
 config-check: config-check-claude config-check-codex ## Show current Claude and Codex MCP config for telegram
 
 config-check-claude: ## Show current Claude user-scope MCP config
-	@if command -v "$(CLAUDE)" >/dev/null 2>&1; then $(CLAUDE) mcp get $(MCP_NAME) || echo "($(MCP_NAME) not yet registered with Claude)"; else echo "Claude CLI not found — skipping"; fi
+	@if command -v "$(CLAUDE)" >/dev/null 2>&1; then $(CLAUDE) mcp get $(MCP_NAME) || echo "($(MCP_NAME) not yet registered with Claude)"; else echo "Claude CLI not found — Claude is not configured. After installing it, run 'make use-http-claude'."; fi
 
 config-check-codex: ## Show current Codex MCP config
-	@if command -v "$(CODEX)" >/dev/null 2>&1; then $(CODEX) mcp get $(MCP_NAME) || echo "($(MCP_NAME) not yet registered with Codex)"; else echo "Codex CLI not found — skipping"; fi
+	@if command -v "$(CODEX)" >/dev/null 2>&1; then $(CODEX) mcp get $(MCP_NAME) || echo "($(MCP_NAME) not yet registered with Codex)"; else echo "Codex CLI not found — Codex is not configured. After installing it, run 'make use-http-codex'."; fi
 
 use-http: use-http-claude use-http-codex ## Switch Claude and Codex MCP config to Streamable HTTP
+	@echo "Finished configuring installed MCP clients for Streamable HTTP. Missing CLIs were skipped."
 
 use-http-claude: ## Switch Claude MCP config to authenticated Streamable HTTP
-	@echo "Removing existing '$(MCP_NAME)' MCP registration (if any)..."
-	@$(CLAUDE) mcp remove --scope user $(MCP_NAME) >/dev/null 2>&1 || true
-	@echo "Registering '$(MCP_NAME)' via Streamable HTTP at $(HTTP_URL) ..."
-	$(CLAUDE) mcp add-json --scope user $(MCP_NAME) '{"type":"http","url":"$(HTTP_URL)","headersHelper":"$(HEADERS_HELPER)"}'
-	@echo ""
-	@echo "Registered '$(MCP_NAME)' as Streamable HTTP. Restart Claude Code to apply the change."
+	@if ! command -v "$(CLAUDE)" >/dev/null 2>&1; then echo "Claude CLI not found — skipping Claude registration."; echo "After installing Claude Code, run 'make use-http-claude'."; exit 0; fi; \
+	set -e; \
+	echo "Removing existing '$(MCP_NAME)' Claude MCP registration (if any)..."; \
+	$(CLAUDE) mcp remove --scope user $(MCP_NAME) >/dev/null 2>&1 || true; \
+	echo "Registering '$(MCP_NAME)' via Streamable HTTP at $(HTTP_URL) ..."; \
+	$(CLAUDE) mcp add-json --scope user $(MCP_NAME) '{"type":"http","url":"$(HTTP_URL)","headersHelper":"$(HEADERS_HELPER)"}'; \
+	echo ""; \
+	echo "Registered '$(MCP_NAME)' for Claude. Restart Claude Code to apply the change."
 
 use-http-codex: ## Switch Codex MCP config to authenticated Streamable HTTP
-	@if ! command -v "$(CODEX)" >/dev/null 2>&1; then echo "Codex CLI not found — skipping Codex registration."; exit 0; fi; \
+	@if ! command -v "$(CODEX)" >/dev/null 2>&1; then echo "Codex CLI not found — skipping Codex registration."; echo "After installing Codex, run 'make use-http-codex'."; exit 0; fi; \
+	set -e; \
 	echo "Removing existing '$(MCP_NAME)' Codex MCP registration (if any)..."; \
 	$(CODEX) mcp remove $(MCP_NAME) >/dev/null 2>&1 || true; \
 	echo "Registering '$(MCP_NAME)' via Streamable HTTP at $(HTTP_URL) ..."; \
@@ -67,25 +71,31 @@ use-sse: use-sse-claude ## Switch Claude MCP config to legacy SSE (Codex does no
 	@echo "Codex supports Streamable HTTP and stdio, not legacy SSE; its configuration was not changed."
 
 use-sse-claude: ## Switch Claude MCP config to authenticated legacy SSE
-	@echo "Removing existing '$(MCP_NAME)' MCP registration (if any)..."
-	@$(CLAUDE) mcp remove --scope user $(MCP_NAME) >/dev/null 2>&1 || true
-	@echo "Registering '$(MCP_NAME)' via legacy SSE at $(SSE_URL) ..."
-	$(CLAUDE) mcp add-json --scope user $(MCP_NAME) '{"type":"sse","url":"$(SSE_URL)","headersHelper":"$(HEADERS_HELPER)"}'
-	@echo ""
-	@echo "Registered '$(MCP_NAME)' as legacy SSE. Restart Claude Code to apply the change."
+	@if ! command -v "$(CLAUDE)" >/dev/null 2>&1; then echo "Claude CLI not found — skipping Claude registration."; echo "After installing Claude Code, run 'make use-sse-claude'."; exit 0; fi; \
+	set -e; \
+	echo "Removing existing '$(MCP_NAME)' Claude MCP registration (if any)..."; \
+	$(CLAUDE) mcp remove --scope user $(MCP_NAME) >/dev/null 2>&1 || true; \
+	echo "Registering '$(MCP_NAME)' via legacy SSE at $(SSE_URL) ..."; \
+	$(CLAUDE) mcp add-json --scope user $(MCP_NAME) '{"type":"sse","url":"$(SSE_URL)","headersHelper":"$(HEADERS_HELPER)"}'; \
+	echo ""; \
+	echo "Registered '$(MCP_NAME)' as legacy SSE for Claude. Restart Claude Code to apply the change."
 
 use-stdio: use-stdio-claude use-stdio-codex ## Switch Claude and Codex MCP config to stdio
+	@echo "Finished configuring installed MCP clients for stdio. Missing CLIs were skipped."
 
 use-stdio-claude: ## Switch Claude MCP config back to stdio
-	@echo "Removing existing '$(MCP_NAME)' MCP registration (if any)..."
-	@$(CLAUDE) mcp remove --scope user $(MCP_NAME) >/dev/null 2>&1 || true
-	@echo "Registering '$(MCP_NAME)' via stdio from $(PROJECT_ROOT) ..."
-	$(CLAUDE) mcp add --scope user $(MCP_NAME) -- "$(START_SCRIPT)" --transport stdio
-	@echo ""
-	@echo "Registered '$(MCP_NAME)' as stdio. Restart Claude Code to apply the change."
+	@if ! command -v "$(CLAUDE)" >/dev/null 2>&1; then echo "Claude CLI not found — skipping Claude registration."; echo "After installing Claude Code, run 'make use-stdio-claude'."; exit 0; fi; \
+	set -e; \
+	echo "Removing existing '$(MCP_NAME)' Claude MCP registration (if any)..."; \
+	$(CLAUDE) mcp remove --scope user $(MCP_NAME) >/dev/null 2>&1 || true; \
+	echo "Registering '$(MCP_NAME)' via stdio from $(PROJECT_ROOT) ..."; \
+	$(CLAUDE) mcp add --scope user $(MCP_NAME) -- "$(START_SCRIPT)" --transport stdio; \
+	echo ""; \
+	echo "Registered '$(MCP_NAME)' as stdio for Claude. Restart Claude Code to apply the change."
 
 use-stdio-codex: ## Switch Codex MCP config back to stdio
-	@if ! command -v "$(CODEX)" >/dev/null 2>&1; then echo "Codex CLI not found — skipping Codex registration."; exit 0; fi; \
+	@if ! command -v "$(CODEX)" >/dev/null 2>&1; then echo "Codex CLI not found — skipping Codex registration."; echo "After installing Codex, run 'make use-stdio-codex'."; exit 0; fi; \
+	set -e; \
 	echo "Removing existing '$(MCP_NAME)' Codex MCP registration (if any)..."; \
 	$(CODEX) mcp remove $(MCP_NAME) >/dev/null 2>&1 || true; \
 	echo "Registering '$(MCP_NAME)' via stdio from $(PROJECT_ROOT) ..."; \
