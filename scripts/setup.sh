@@ -43,14 +43,19 @@ if ! xcode-select -p &>/dev/null; then
 fi
 
 # uv
+# The Astral installer drops uv in ~/.local/bin, which a non-login shell may not
+# have on PATH yet — add it before probing so an existing install is found.
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
 if ! command -v uv &>/dev/null; then
   echo "  安裝 uv…"
-  if command -v brew &>/dev/null; then
-    brew install uv
-  else
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    # Add to PATH for this session
+  # Prefer the Astral installer: it ships prebuilt binaries. Homebrew is a
+  # fallback because a prefix without bottles for this macOS/arch (e.g. a
+  # Rosetta /usr/local brew) builds rust and llvm from source for hours.
+  if curl -LsSf https://astral.sh/uv/install.sh | sh; then
     export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+  elif command -v brew &>/dev/null; then
+    brew install uv
   fi
   if ! command -v uv &>/dev/null; then
     echo "  ⚠️  uv 安裝完成但需要重新開啟 Terminal 後再執行本 script"
@@ -178,23 +183,107 @@ echo
 # ── Step 6: Verify Streamable HTTP server ─────────────────────────────────────
 
 echo "步驟 6：驗證 Streamable HTTP server…"
-if launchctl list | grep -q "com.telegram-mcp.server"; then
-  PID=$(launchctl list | grep "com.telegram-mcp.server" | awk '{print $1}')
-  if [[ "$PID" =~ ^[0-9]+$ ]]; then
-    echo "  ✅ launchd 服務運行中 (PID $PID)"
-  else
-    echo "  ⚠️  launchd 服務已註冊但未啟動，請檢查 ~/Library/Logs/telegram-mcp/server.err.log"
-  fi
+
+MCP_PORT=8765   # 需與 install-launchd.sh 的 --port 一致
+MCP_URL="http://127.0.0.1:${MCP_PORT}/mcp"
+LOG_ERR="$HOME/Library/Logs/telegram-mcp/server.err.log"
+VERIFY_OK=1
+
+# 6a. launchd 是否註冊、是否真的有進程
+LAUNCHD_LINE="$(launchctl list | grep "com.telegram-mcp.server" || true)"
+if [[ -z "$LAUNCHD_LINE" ]]; then
+  echo "  ❌ launchd 服務未註冊，請重新執行 install-launchd.sh"
+  VERIFY_OK=0
 else
-  echo "  ⚠️  launchd 服務未註冊，請重新執行 install-launchd.sh"
+  SERVICE_PID="$(awk '{print $1}' <<<"$LAUNCHD_LINE")"
+  if [[ "$SERVICE_PID" =~ ^[0-9]+$ ]]; then
+    echo "  ✅ launchd 服務已啟動 (PID $SERVICE_PID)"
+  else
+    echo "  ⚠️  launchd 服務已註冊，但目前沒有執行中的進程"
+  fi
+fi
+
+# 6b. port 是否真的在監聽（服務可能註冊成功卻不斷崩潰重啟）
+if [[ "$VERIFY_OK" == 1 ]]; then
+  PORT_UP=0
+  for _ in $(seq 1 40); do
+    if nc -z 127.0.0.1 "$MCP_PORT" 2>/dev/null; then PORT_UP=1; break; fi
+    sleep 0.5
+  done
+  if [[ "$PORT_UP" == 1 ]]; then
+    echo "  ✅ Port $MCP_PORT 監聽中"
+  else
+    echo "  ❌ Port $MCP_PORT 在 20 秒內沒有起來"
+    VERIFY_OK=0
+  fi
+fi
+
+# 6c. 認證與 MCP 交握
+if [[ "$VERIFY_OK" == 1 ]]; then
+  MCP_TOKEN="$(_kc_get telegram-mcp-token)"
+  if [[ -z "$MCP_TOKEN" ]]; then
+    echo "  ❌ Keychain 找不到 telegram-mcp-token，請重新執行 install-launchd.sh"
+    VERIFY_OK=0
+  else
+    INIT_BODY='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"setup.sh","version":"1"}}}'
+
+    CODE_NOAUTH="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$MCP_URL" \
+      -X POST -H 'Content-Type: application/json' \
+      -H 'Accept: application/json, text/event-stream' -d "$INIT_BODY" || echo 000)"
+    if [[ "$CODE_NOAUTH" == "401" ]]; then
+      echo "  ✅ 未帶 token 正確回傳 401"
+    else
+      echo "  ⚠️  未帶 token 預期 401，實際收到 $CODE_NOAUTH"
+    fi
+
+    INIT_RESP="$(curl -s --max-time 15 "$MCP_URL" -X POST \
+      -H "Authorization: Bearer $MCP_TOKEN" -H 'Content-Type: application/json' \
+      -H 'Accept: application/json, text/event-stream' -d "$INIT_BODY" || true)"
+    if grep -q '"serverInfo"' <<<"$INIT_RESP"; then
+      SERVER_INFO="$(sed -n 's/.*"serverInfo":{"name":"\([^"]*\)","version":"\([^"]*\)".*/\1 v\2/p' <<<"$INIT_RESP")"
+      echo "  ✅ MCP 交握成功${SERVER_INFO:+（${SERVER_INFO}）}"
+    else
+      echo "  ❌ MCP 交握失敗（帶 token 仍無法取得 serverInfo）"
+      VERIFY_OK=0
+    fi
+  fi
+fi
+
+# 6d. 失敗時給出可行動的診斷
+if [[ "$VERIFY_OK" != 1 ]]; then
+  echo
+  echo "  ── 診斷 ──"
+  if [[ -z "$(_kc_get telegram-session-string)" ]]; then
+    SESSION_LABELS="$(_kc_get telegram-session-labels)"
+    if [[ -n "$SESSION_LABELS" ]]; then
+      echo "  ⚠️  Keychain 只有帶 label 的 session（${SESSION_LABELS}），"
+      echo "      但服務讀取的是無 label 的 telegram-session-string。"
+      echo "      請重跑步驟 2，並在 Account label 那題直接按 Enter 留空。"
+    else
+      echo "  ⚠️  Keychain 沒有 telegram-session-string。"
+      echo "      請重跑步驟 2，並在最後一題輸入 y 存入 Keychain。"
+    fi
+  fi
+  if [[ -f "$LOG_ERR" ]]; then
+    echo "  最近的錯誤訊息（${LOG_ERR}）："
+    { grep -v "IncompleteFieldDefinitionWarning\|warnings.warn" "$LOG_ERR" | tail -5 | sed 's/^/      /'; } || true
+  fi
 fi
 echo
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
-echo "=== 設定完成 ==="
-echo
-echo "下一步："
-echo "  1. 完全結束 Claude Code 與 Codex，再重新開啟"
-echo "  2. 執行 'make config-check' 確認兩個 client 都已載入 Streamable HTTP"
-echo "  3. 在任一 client 中問「幫我查看我的 Telegram 帳號資訊」測試"
+if [[ "$VERIFY_OK" == 1 ]]; then
+  echo "=== 設定完成 ==="
+  echo
+  echo "下一步："
+  echo "  1. 完全結束 Claude Code 與 Codex，再重新開啟"
+  echo "  2. 執行 'make config-check' 確認兩個 client 都已載入 Streamable HTTP"
+  echo "  3. 在任一 client 中問「幫我查看我的 Telegram 帳號資訊」測試"
+else
+  echo "=== 設定尚未完成 ==="
+  echo
+  echo "server 無法正常提供服務，請依照上方診斷處理後重新執行本 script。"
+  echo "重跑本 script 是安全的：已存在的憑證會被沿用，不會重複詢問。"
+  exit 1
+fi
