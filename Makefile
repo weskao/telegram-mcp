@@ -55,12 +55,13 @@ use-http-claude: ## Switch Claude MCP config to authenticated Streamable HTTP
 	@echo "Registered '$(MCP_NAME)' as Streamable HTTP. Restart Claude Code to apply the change."
 
 use-http-codex: ## Switch Codex MCP config to authenticated Streamable HTTP
-	@echo "Removing existing '$(MCP_NAME)' Codex MCP registration (if any)..."
-	@$(CODEX) mcp remove $(MCP_NAME) >/dev/null 2>&1 || true
-	@echo "Registering '$(MCP_NAME)' via Streamable HTTP at $(HTTP_URL) ..."
-	$(CODEX) mcp add $(MCP_NAME) --url "$(HTTP_URL)" --bearer-token-env-var "$(CODEX_BEARER_ENV)"
-	@echo ""
-	@echo "Registered '$(MCP_NAME)' for Codex. Restart Codex after the launchd service is running."
+	@if ! command -v "$(CODEX)" >/dev/null 2>&1; then echo "Codex CLI not found — skipping Codex registration."; exit 0; fi; \
+	echo "Removing existing '$(MCP_NAME)' Codex MCP registration (if any)..."; \
+	$(CODEX) mcp remove $(MCP_NAME) >/dev/null 2>&1 || true; \
+	echo "Registering '$(MCP_NAME)' via Streamable HTTP at $(HTTP_URL) ..."; \
+	$(CODEX) mcp add $(MCP_NAME) --url "$(HTTP_URL)" --bearer-token-env-var "$(CODEX_BEARER_ENV)"; \
+	echo ""; \
+	echo "Registered '$(MCP_NAME)' for Codex. Restart Codex after the launchd service is running."
 
 use-sse: use-sse-claude ## Switch Claude MCP config to legacy SSE (Codex does not support SSE)
 	@echo "Codex supports Streamable HTTP and stdio, not legacy SSE; its configuration was not changed."
@@ -84,12 +85,13 @@ use-stdio-claude: ## Switch Claude MCP config back to stdio
 	@echo "Registered '$(MCP_NAME)' as stdio. Restart Claude Code to apply the change."
 
 use-stdio-codex: ## Switch Codex MCP config back to stdio
-	@echo "Removing existing '$(MCP_NAME)' Codex MCP registration (if any)..."
-	@$(CODEX) mcp remove $(MCP_NAME) >/dev/null 2>&1 || true
-	@echo "Registering '$(MCP_NAME)' via stdio from $(PROJECT_ROOT) ..."
-	$(CODEX) mcp add $(MCP_NAME) -- "$(START_SCRIPT)" --transport stdio
-	@echo ""
-	@echo "Registered '$(MCP_NAME)' as stdio. Restart Codex to apply the change."
+	@if ! command -v "$(CODEX)" >/dev/null 2>&1; then echo "Codex CLI not found — skipping Codex registration."; exit 0; fi; \
+	echo "Removing existing '$(MCP_NAME)' Codex MCP registration (if any)..."; \
+	$(CODEX) mcp remove $(MCP_NAME) >/dev/null 2>&1 || true; \
+	echo "Registering '$(MCP_NAME)' via stdio from $(PROJECT_ROOT) ..."; \
+	$(CODEX) mcp add $(MCP_NAME) -- "$(START_SCRIPT)" --transport stdio; \
+	echo ""; \
+	echo "Registered '$(MCP_NAME)' as stdio. Restart Codex to apply the change."
 
 sync-upstream-readme: ## Refresh README.upstream.md from upstream/main (never edit it by hand)
 	@git remote get-url upstream >/dev/null 2>&1 || { echo "No 'upstream' remote. Add it: git remote add upstream https://github.com/chigwell/telegram-mcp.git"; exit 1; }
