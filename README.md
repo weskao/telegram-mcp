@@ -48,7 +48,7 @@ bash scripts/setup.sh
 ### 🛠️ 開發者便利工具
 
 - 繁體中文安裝指南 **[SETUP.md](SETUP.md)**。
-- Makefile 便利指令：`make start-http`、`make use-http`、`make use-sse`、`make use-stdio`、`make config-check`… 執行 `make list` 查看全部。
+- Makefile 便利指令：`make start-http`、`make use-http`、`make use-sse`、`make use-stdio`、`make config-check`、`make health`… 執行 `make list` 查看全部。
 - SSE bearer 驗證輔助腳本 `scripts/mcp-auth-headers.sh`。
 
 ---

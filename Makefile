@@ -38,7 +38,7 @@ start-stdio: ## Run stdio mode in foreground
 	"$(START_SCRIPT)" --transport stdio
 
 health: ## Check telegram-mcp health across launchd, HTTP server, and Claude registration
-	@MCP_HOST=$(MCP_HOST) MCP_PORT=$(MCP_PORT) MCP_NAME=$(MCP_NAME) CLAUDE=$(CLAUDE) bash "$(HEALTH_SCRIPT)"
+	@MCP_HOST=$(MCP_HOST) MCP_PORT=$(MCP_PORT) MCP_NAME=$(MCP_NAME) CLAUDE=$(CLAUDE) "$(HEALTH_SCRIPT)"
 
 config-check: config-check-claude config-check-codex ## Show current Claude and Codex MCP config for telegram
 

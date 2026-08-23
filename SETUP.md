@@ -232,6 +232,8 @@ make start-http    # 前景啟動 Streamable HTTP mode
 make start-sse     # 前景啟動 legacy SSE mode
 make start-stdio   # 前景啟動 stdio mode
 
+make health        # 一次檢查 launchd／HTTP server／Claude 註冊三層狀態
+
 make config-check  # 顯示目前 Claude Code 與 Codex MCP 設定
 make use-http      # 兩個 client 切到 Streamable HTTP
 make use-sse       # Claude Code 切到 legacy SSE；Codex 維持原設定
@@ -418,6 +420,14 @@ claude mcp list
 ```
 
 看到 `telegram`（或你用 `MCP_NAME=...` 指定的名稱）出現且狀態正常即完成。也可以直接問 Claude「幫我查看我的 Telegram 帳號資訊」，Claude 應該能回傳你的帳號名稱。
+
+日常想確認服務狀態時，執行：
+
+```bash
+make health
+```
+
+會一次列出三層狀態：launchd 服務是否真的在執行（含 PID）、HTTP server 是否在監聽（`HTTP 401` 代表 server 正常且 bearer token 驗證有生效），以及 Claude 的 MCP registration 是否連線成功。此指令純唯讀、不會改動任何設定；三層全部正常時 exit code 為 0，可串接其他指令（`make health && ...`）。
 
 ---
 
