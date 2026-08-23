@@ -5,6 +5,7 @@
 PROJECT_ROOT := $(CURDIR)
 START_SCRIPT := $(PROJECT_ROOT)/scripts/start.sh
 HEADERS_HELPER := $(PROJECT_ROOT)/scripts/mcp-auth-headers.sh
+HEALTH_SCRIPT := $(PROJECT_ROOT)/scripts/health-check.sh
 MCP_NAME ?= telegram-mcp
 MCP_HOST ?= 127.0.0.1
 MCP_PORT ?= 8765
@@ -15,7 +16,7 @@ CODEX ?= codex
 CODEX_BEARER_ENV ?= TELEGRAM_MCP_TOKEN
 UV ?= uv
 
-.PHONY: list help start start-http start-sse start-stdio config-check config-check-claude config-check-codex use-http use-http-claude use-http-codex use-sse use-sse-claude use-stdio use-stdio-claude use-stdio-codex sync-upstream-readme
+.PHONY: list help start start-http start-sse start-stdio health config-check config-check-claude config-check-codex use-http use-http-claude use-http-codex use-sse use-sse-claude use-stdio use-stdio-claude use-stdio-codex sync-upstream-readme
 
 list:
 	@echo "Available commands:"
@@ -35,6 +36,9 @@ start-sse: ## Run legacy SSE mode in foreground at http://127.0.0.1:8765/sse
 
 start-stdio: ## Run stdio mode in foreground
 	"$(START_SCRIPT)" --transport stdio
+
+health: ## Check telegram-mcp health across launchd, HTTP server, and Claude registration
+	@MCP_HOST=$(MCP_HOST) MCP_PORT=$(MCP_PORT) MCP_NAME=$(MCP_NAME) CLAUDE=$(CLAUDE) bash "$(HEALTH_SCRIPT)"
 
 config-check: config-check-claude config-check-codex ## Show current Claude and Codex MCP config for telegram
 
