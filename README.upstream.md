@@ -428,13 +428,6 @@ Security behavior:
   `TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1` to fall back to the server CLI roots
   in that case (opt-in; the default stays deny-all). The same opt-in also applies
   when `list_roots` fails unexpectedly and no client paths could be recovered.
-- Stateless streamable HTTP (the launchd server's transport) cannot deliver a
-  Roots request to the client at all, so it always falls back to server CLI
-  roots (unless `TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=0`), with no request or
-  timeout paid. On other transports, a client that accepts the request but
-  never answers it fails after `TELEGRAM_ROOTS_REQUEST_TIMEOUT_SECONDS`
-  (default `10`) instead of hanging; that case only falls back to server CLI
-  roots under the same opt-in. Restart the server for a change to take effect.
 - Paths are resolved through real paths and must stay inside an allowed root.
 - Traversal, wildcard-like, shell-like, and null-byte path patterns are rejected.
 - Relative paths resolve under the first allowed root.

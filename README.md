@@ -31,6 +31,7 @@ bash scripts/setup.sh
 
 - `bash scripts/setup.sh`：一次安裝、將 bearer token 存入 Keychain，並把 Claude Code 與 Codex 設為連向同一個本機 HTTP server。
 - `scripts/install-launchd.sh`：安裝 launchd 服務並開機自啟，讓 HTTP server 常駐。
+- launchd 用的 stateless streamable HTTP 傳輸無法向 client 發出 Roots 請求，因此一律 fallback 回 server CLI roots（除非設定 `TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=0`），不會等待或逾時。其他傳輸模式下，client 接受了 Roots 請求卻不回應，會在 `TELEGRAM_ROOTS_REQUEST_TIMEOUT_SECONDS`（預設 `10` 秒）後失敗，而非卡住；同樣受上述 opt-in 控制是否 fallback。修改後需重啟服務才會生效。
 
 ### 🔐 Keychain 優先的 Session 儲存
 
