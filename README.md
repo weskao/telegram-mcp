@@ -67,6 +67,7 @@ bash scripts/setup.sh
 
 - 例行更新上游 README 參照：`make sync-upstream-readme`（絕不手動編輯 `README.upstream.md`）。
 - 完整合併上游修正／新工具：見 `/sync-upstream` 指令（[.claude/commands/sync-upstream.md](.claude/commands/sync-upstream.md)）。
+- 裝好 `post-merge` hook（`uv run pre-commit install --hook-type post-merge`）後，每次 `git merge`／`git pull` 都會自動跑上面那個 `make sync-upstream-readme`（有設定 `upstream` remote 才會動作），只會更新檔案不會自動 commit。
 
 ---
 

@@ -44,3 +44,12 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-push]
+      - id: sync-upstream-readme
+        name: refresh README.upstream.md after merge
+        entry: >-
+          sh -c 'git remote get-url upstream >/dev/null 2>&1 &&
+          [ -f README.upstream.md ] && make sync-upstream-readme || true'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [post-merge]
