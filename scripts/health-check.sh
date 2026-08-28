@@ -3,8 +3,11 @@
 #   1. launchd  — is the background service loaded *and running*?
 #   2. server   — is the HTTP port listening? (401 is healthy: auth is enforced)
 #   3. claude   — is Claude's MCP registration actually connecting?
-#   4. codex    — is Codex's MCP registration present and enabled?
-#                 (Codex reports config only; it has no live-connection status.)
+#   4. codex    — is Codex's MCP registration enabled *and* does the bearer token it
+#                 points at actually complete an MCP handshake? The Codex CLI has no
+#                 connection probe (a dead URL still lists as "enabled"), so we run one
+#                 ourselves: resolve the token from the env var Codex reads, then POST
+#                 `initialize`. 200 = token accepted, 401 = Codex would be rejected.
 #
 # Read-only: never changes config. Exits 0 when every layer is healthy,
 # 1 otherwise, so it can gate other commands (`make health && ...`).
@@ -30,20 +33,24 @@ LOG_ERR="$HOME/Library/Logs/telegram-mcp/server.err.log"
 
 fail=0
 
+# Result markers. ok/bad carry the pass/fail verdict for a layer (bad also flags the
+# run); skip is for a layer that legitimately does not apply, e.g. an uninstalled CLI.
+ok()   { echo "  ✅ $*"; }
+bad()  { echo "  ❌ $*"; fail=1; }
+skip() { echo "  ⏭️  $*"; }
+
 # 1. launchd — exact label match on column 3; column 1 is the PID ("-" when the
 #    job is registered but not running, e.g. crash-looping). Same parse as setup.sh.
 echo "launchd:"
 launchd_line="$(launchctl list 2>/dev/null | awk -v label="$LAUNCHD_LABEL" '$3 == label')"
 if [[ -z "$launchd_line" ]]; then
-  echo "  NOT loaded — run scripts/install-launchd.sh"
-  fail=1
+  bad "NOT loaded — run scripts/install-launchd.sh"
 else
   launchd_pid="$(awk '{print $1}' <<<"$launchd_line")"
   if [[ "$launchd_pid" =~ ^[0-9]+$ ]]; then
-    echo "  running (PID $launchd_pid, $LAUNCHD_LABEL)"
+    ok "running (PID $launchd_pid, $LAUNCHD_LABEL)"
   else
-    echo "  loaded but NOT running — check $LOG_ERR"
-    fail=1
+    bad "loaded but NOT running — check $LOG_ERR"
   fi
 fi
 
@@ -52,45 +59,72 @@ echo "server :"
 code="$(curl -sS -o /dev/null -w '%{http_code}' -m 5 -X POST \
   -H 'Content-Type: application/json' -d '{}' "$MCP_URL" 2>/dev/null)"
 case "${code:-000}" in
-  401) echo "  HTTP 401 — up (auth enforced, healthy)";;
-  200) echo "  HTTP 200 — up";;
-  000) echo "  unreachable — server not listening on $MCP_HOST:$MCP_PORT"; fail=1;;
-  *)   echo "  HTTP $code — up but unexpected status"; fail=1;;
+  401) ok  "HTTP 401 — up (auth enforced, healthy)";;
+  200) ok  "HTTP 200 — up";;
+  000) bad "unreachable — server not listening on $MCP_HOST:$MCP_PORT";;
+  *)   bad "HTTP $code — up but unexpected status";;
 esac
 
 # 3. claude — registration status. A missing CLI is not a failure (Codex-only setups).
 echo "claude :"
 if ! command -v "$CLAUDE" >/dev/null 2>&1; then
-  echo "  claude CLI not found — skipped"
+  skip "claude CLI not found"
 elif ! mcp_get="$("$CLAUDE" mcp get "$MCP_NAME" 2>/dev/null)" || [[ -z "$mcp_get" ]]; then
-  echo "  $MCP_NAME not registered — run 'make use-http-claude'"
-  fail=1
+  bad "$MCP_NAME not registered — run 'make use-http-claude'"
+elif grep -q 'Connected' <<<"$mcp_get"; then
+  ok "connected (Claude's own registration)"
 else
-  status="$(grep -E 'Status|Issue' <<<"$mcp_get" | sed 's/^ */  /')"
-  echo "${status:-  registered (no status line reported)}"
-  grep -q 'Connected' <<<"$mcp_get" || fail=1
+  # `claude mcp get` reports the reason on an "Issue:" line; fall through to the raw
+  # status text if the format ever changes.
+  issue="$(sed -n 's/^[[:space:]]*Issue:[[:space:]]*//p' <<<"$mcp_get" | head -1)"
+  bad "NOT connected — ${issue:-$(grep -E 'Status' <<<"$mcp_get" | head -1 | sed 's/^[[:space:]]*//')}"
 fi
 
-# 4. codex — registration status. A missing CLI is not a failure (Claude-only setups).
-#    `codex mcp get` prints static config; there is no connection probe, so "enabled"
-#    is the strongest signal available.
+# 4. codex — config plus a real handshake. A missing CLI is not a failure (Claude-only
+#    setups). `codex mcp get` reports config only, so after the config checks we probe
+#    the connection the way Codex would: read the token out of the env var Codex is
+#    configured to use and POST an `initialize` request. The token is never echoed.
 echo "codex  :"
 if ! command -v "$CODEX" >/dev/null 2>&1; then
-  echo "  codex CLI not found — skipped"
+  skip "codex CLI not found"
 elif ! codex_get="$("$CODEX" mcp get "$MCP_NAME" 2>/dev/null)" || [[ -z "$codex_get" ]]; then
-  echo "  $MCP_NAME not registered — run 'make use-http-codex'"
-  fail=1
-elif grep -qE '^[[:space:]]*enabled:[[:space:]]*true' <<<"$codex_get"; then
-  echo "  registered and enabled ($(grep -E '^[[:space:]]*transport:' <<<"$codex_get" | awk '{print $2}'))"
+  bad "$MCP_NAME not registered — run 'make use-http-codex'"
+elif ! grep -qE '^[[:space:]]*enabled:[[:space:]]*true' <<<"$codex_get"; then
+  bad "registered but DISABLED — run 'make use-http-codex'"
 else
-  echo "  registered but DISABLED — run 'make use-http-codex'"
-  fail=1
+  codex_transport="$(awk '/^[[:space:]]*transport:/{print $2; exit}' <<<"$codex_get")"
+  codex_var="$(awk '/^[[:space:]]*bearer_token_env_var:/{print $2; exit}' <<<"$codex_get")"
+  if [[ -z "$codex_var" || "$codex_var" == "-" ]]; then
+    bad "enabled ($codex_transport) but no bearer_token_env_var — run 'make use-http-codex'"
+  else
+    # Both lookups are paths Codex itself uses: launcher.sh publishes the token via
+    # `launchctl setenv` (what a GUI-launched Codex inherits), and a Codex started from
+    # a shell inherits that shell's exported value instead.
+    codex_token="${!codex_var:-}"
+    [[ -z "$codex_token" ]] && codex_token="$(launchctl getenv "$codex_var" 2>/dev/null)"
+    if [[ -z "$codex_token" ]]; then
+      bad "enabled ($codex_transport) but \$$codex_var is unset — restart the service"
+    else
+      codex_code="$(curl -sS -o /dev/null -w '%{http_code}' -m 5 -X POST \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        -H "Authorization: Bearer $codex_token" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"health-check","version":"0"}}}' \
+        "$MCP_URL" 2>/dev/null)"
+      case "${codex_code:-000}" in
+        200) ok  "handshake OK ($codex_transport, token from \$$codex_var)";;
+        401) bad "the token in \$$codex_var was REJECTED (HTTP 401)";;
+        000) bad "server unreachable at $MCP_HOST:$MCP_PORT";;
+        *)   bad "handshake returned HTTP $codex_code";;
+      esac
+    fi
+  fi
 fi
 
 echo
 if [[ "$fail" -eq 0 ]]; then
-  echo "healthy"
+  echo "✅ healthy"
 else
-  echo "problems found — see above"
+  echo "❌ problems found — see above"
 fi
 exit "$fail"

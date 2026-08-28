@@ -276,7 +276,7 @@ make start-http    # 前景啟動 Streamable HTTP mode
 make start-sse     # 前景啟動 legacy SSE mode
 make start-stdio   # 前景啟動 stdio mode
 
-make health        # 一次檢查 launchd／HTTP server／Claude 註冊三層狀態
+make health        # 一次檢查 launchd／HTTP server／Claude／Codex 四層狀態
 
 make config-check  # 顯示目前 Claude Code 與 Codex MCP 設定
 make use-http      # 兩個 client 切到 Streamable HTTP
@@ -479,7 +479,14 @@ claude mcp list
 make health
 ```
 
-會一次列出三層狀態：launchd 服務是否真的在執行（含 PID）、HTTP server 是否在監聽（`HTTP 401` 代表 server 正常且 bearer token 驗證有生效），以及 Claude 的 MCP registration 是否連線成功。此指令純唯讀、不會改動任何設定；三層全部正常時 exit code 為 0，可串接其他指令（`make health && ...`）。
+會一次列出四層狀態，每層以 ✅／❌ 標示（不適用的層級標 ⏭️）：
+
+1. **launchd** — 服務是否真的在執行（含 PID）。
+2. **server** — HTTP server 是否在監聽（`HTTP 401` 代表 server 正常且 bearer token 驗證有生效）。
+3. **claude** — Claude 的 MCP registration 是否連線成功（`claude mcp get` 會真的建立連線）。
+4. **codex** — Codex CLI 只會回報靜態設定（指向失效的 URL 也照樣顯示 `enabled`），因此這裡改為自行探測：取出 Codex 設定要讀的環境變數（`bearer_token_env_var`）中的 token，對 server 發出真正的 MCP `initialize` 請求。`200` 表示 Codex 這把 token 可以通過認證，`401` 表示 Codex 會被拒絕。token 不會出現在輸出中。
+
+此指令純唯讀、不會改動任何設定；全部正常時 exit code 為 0，可串接其他指令（`make health && ...`）。
 
 ---
 
