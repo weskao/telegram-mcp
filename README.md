@@ -84,6 +84,7 @@ launchctl kickstart -k "gui/$(id -u)/com.telegram-mcp.server"
 - 繁體中文安裝指南 **[SETUP.md](SETUP.md)**。
 - Makefile 便利指令：`make start-http`、`make use-http`、`make use-sse`、`make use-stdio`、`make config-check`、`make health`… 執行 `make list` 查看全部。
 - SSE bearer 驗證輔助腳本 `scripts/mcp-auth-headers.sh`。
+- HTTP 位址集中於 `.env` 的 `MCP_HOST` / `MCP_PORT`：Makefile 與各腳本都經由 `scripts/mcp-endpoint.sh` 解析（環境變數 → `.env` → 預設 `127.0.0.1:8765`），沒設定就用預設值。
 
 ---
 

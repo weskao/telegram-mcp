@@ -12,6 +12,9 @@ mkdir -p "$(dirname "$LAUNCHER")"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 UV_BIN="$(command -v uv)"
 
+# MCP_HOST / MCP_PORT / MCP_URL from env, then .env, then defaults.
+source "$SCRIPT_DIR/mcp-endpoint.sh"
+
 # Allowed roots for file-path tools (send_file, download_media, ...).
 #
 # Stateless streamable HTTP builds a fresh transport per HTTP request, so the
@@ -90,10 +93,10 @@ fi
 export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_STRING TELEGRAM_MCP_TOKEN
 launchctl setenv TELEGRAM_MCP_TOKEN "\$TELEGRAM_MCP_TOKEN"
 launchctl setenv TELEGRAM_MCP_HTTP_VALUE "\$TELEGRAM_MCP_TOKEN"
-"${UV_BIN}" --directory "${PROJECT_DIR}" run telegram-mcp --transport http --port 8765${ROOTS_ARGS} &
+"${UV_BIN}" --directory "${PROJECT_DIR}" run telegram-mcp --transport http --port ${MCP_PORT}${ROOTS_ARGS} &
 SERVER_PID=\$!
 for i in \$(seq 1 60); do
-  nc -z 127.0.0.1 8765 2>/dev/null && { echo "[telegram-mcp] Port 8765 is up (attempt \$i)." >&2; break; }
+  nc -z ${MCP_HOST} ${MCP_PORT} 2>/dev/null && { echo "[telegram-mcp] Port ${MCP_PORT} is up (attempt \$i)." >&2; break; }
   sleep 0.5
 done
 wait "\$SERVER_PID"
@@ -143,11 +146,29 @@ launchctl setenv TELEGRAM_MCP_TOKEN "$TOKEN"
 launchctl setenv TELEGRAM_MCP_HTTP_VALUE "$TOKEN"
 
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
+
+# The outgoing server keeps the port bound for a moment after unload. Wait for
+# it to be released first, otherwise the readiness probe below is satisfied by
+# the process we just stopped and we register clients against a dying server.
+for i in {1..20}; do
+  nc -z "$MCP_HOST" "$MCP_PORT" 2>/dev/null || break
+  sleep 0.5
+done
+
 launchctl load "$PLIST_PATH"
+
+# The Python server needs a few seconds to bind. Wait for it before registering
+# clients, otherwise Claude's registration probe (and any immediate `make health`)
+# sees a closed port and reports a failure that resolves itself moments later.
+for i in {1..40}; do
+  nc -z "$MCP_HOST" "$MCP_PORT" 2>/dev/null && break
+  sleep 0.5
+  [[ $i -eq 40 ]] && echo "[telegram-mcp] WARNING: port $MCP_PORT still not listening after 20s — check $LOG_DIR/server.err.log" >&2
+done
 
 make -C "$PROJECT_DIR" use-http
 
-echo "[telegram-mcp] LaunchAgent installed and Streamable HTTP server started on http://127.0.0.1:8765/mcp"
+echo "[telegram-mcp] LaunchAgent installed and Streamable HTTP server started on $MCP_URL"
 if [[ ${#ALLOWED_ROOTS[@]} -gt 0 ]]; then
   echo "[telegram-mcp] File-path tools allowed roots:"
   printf '[telegram-mcp]   %s\n' "${ALLOWED_ROOTS[@]}"

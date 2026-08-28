@@ -227,8 +227,9 @@ echo
 
 echo "步驟 6：驗證 Streamable HTTP server…"
 
-MCP_PORT=8765   # 需與 install-launchd.sh 的 --port 一致
-MCP_URL="http://127.0.0.1:${MCP_PORT}/mcp"
+# MCP_HOST / MCP_PORT / MCP_URL from env, then .env, then defaults — the same
+# resolution install-launchd.sh uses, so this always probes the real port.
+source "$SCRIPT_DIR/mcp-endpoint.sh"
 LOG_ERR="$HOME/Library/Logs/telegram-mcp/server.err.log"
 VERIFY_OK=1
 
@@ -245,7 +246,7 @@ fi
 if [[ "$VERIFY_OK" == 1 ]]; then
   PORT_UP=0
   for _ in $(seq 1 40); do
-    if nc -z 127.0.0.1 "$MCP_PORT" 2>/dev/null; then PORT_UP=1; break; fi
+    if nc -z "$MCP_HOST" "$MCP_PORT" 2>/dev/null; then PORT_UP=1; break; fi
     sleep 0.5
   done
   if [[ "$PORT_UP" == 1 ]]; then

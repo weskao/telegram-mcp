@@ -6,9 +6,16 @@ PROJECT_ROOT := $(CURDIR)
 START_SCRIPT := $(PROJECT_ROOT)/scripts/start.sh
 HEADERS_HELPER := $(PROJECT_ROOT)/scripts/mcp-auth-headers.sh
 HEALTH_SCRIPT := $(PROJECT_ROOT)/scripts/health-check.sh
+ENV_FILE := $(PROJECT_ROOT)/.env
+
+# Same precedence as scripts/mcp-endpoint.sh: a command-line or environment
+# override wins (`?=`), then .env — the file the server itself reads via
+# load_dotenv — and only then the built-in default.
+env_get = $(shell [ -f "$(ENV_FILE)" ] && sed -n 's/^[[:space:]]*$(1)[[:space:]]*=[[:space:]]*\([^[:space:]\#]*\).*/\1/p' "$(ENV_FILE)" | tail -1 | tr -d "\"'")
+
 MCP_NAME ?= telegram-mcp
-MCP_HOST ?= 127.0.0.1
-MCP_PORT ?= 8765
+MCP_HOST ?= $(or $(call env_get,MCP_HOST),127.0.0.1)
+MCP_PORT ?= $(or $(call env_get,MCP_PORT),8765)
 HTTP_URL ?= http://$(MCP_HOST):$(MCP_PORT)/mcp
 SSE_URL ?= http://$(MCP_HOST):$(MCP_PORT)/sse
 CLAUDE ?= claude
@@ -28,10 +35,10 @@ help: list ## Same as list; show available commands
 
 start: start-http ## Run HTTP mode in foreground
 
-start-http: ## Run Streamable HTTP mode in foreground at http://127.0.0.1:8765/mcp
+start-http: ## Run Streamable HTTP mode in foreground on /mcp (MCP_HOST/MCP_PORT or .env)
 	MCP_HOST=$(MCP_HOST) "$(START_SCRIPT)" --transport http --port $(MCP_PORT)
 
-start-sse: ## Run legacy SSE mode in foreground at http://127.0.0.1:8765/sse
+start-sse: ## Run legacy SSE mode in foreground on /sse (MCP_HOST/MCP_PORT or .env)
 	MCP_HOST=$(MCP_HOST) "$(START_SCRIPT)" --transport sse --port $(MCP_PORT)
 
 start-stdio: ## Run stdio mode in foreground

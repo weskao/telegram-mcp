@@ -15,19 +15,19 @@
 # Usage:
 #   bash scripts/health-check.sh        # or: make health
 #
-# Overridable via env (defaults match the Makefile):
+# Overridable via env; otherwise read from .env, else the built-in defaults:
 #   MCP_HOST=127.0.0.1 MCP_PORT=8765 MCP_NAME=telegram-mcp
 
 # NOTE: deliberately no `-e` — every layer must be reported even when an
 # earlier one fails. Failures are collected in $fail instead.
 set -uo pipefail
 
-MCP_HOST="${MCP_HOST:-127.0.0.1}"
-MCP_PORT="${MCP_PORT:-8765}"
+# MCP_HOST / MCP_PORT / MCP_URL from env, then .env, then defaults.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mcp-endpoint.sh"
+
 MCP_NAME="${MCP_NAME:-telegram-mcp}"
 CLAUDE="${CLAUDE:-claude}"
 CODEX="${CODEX:-codex}"
-MCP_URL="http://${MCP_HOST}:${MCP_PORT}/mcp"
 LAUNCHD_LABEL="com.telegram-mcp.server"
 LOG_ERR="$HOME/Library/Logs/telegram-mcp/server.err.log"
 
