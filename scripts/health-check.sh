@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# One-shot health check for the telegram-mcp server across all three layers:
+# One-shot health check for the telegram-mcp server across all four layers:
 #   1. launchd  — is the background service loaded *and running*?
 #   2. server   — is the HTTP port listening? (401 is healthy: auth is enforced)
 #   3. claude   — is Claude's MCP registration actually connecting?
+#   4. codex    — is Codex's MCP registration present and enabled?
+#                 (Codex reports config only; it has no live-connection status.)
 #
 # Read-only: never changes config. Exits 0 when every layer is healthy,
 # 1 otherwise, so it can gate other commands (`make health && ...`).
@@ -21,6 +23,7 @@ MCP_HOST="${MCP_HOST:-127.0.0.1}"
 MCP_PORT="${MCP_PORT:-8765}"
 MCP_NAME="${MCP_NAME:-telegram-mcp}"
 CLAUDE="${CLAUDE:-claude}"
+CODEX="${CODEX:-codex}"
 MCP_URL="http://${MCP_HOST}:${MCP_PORT}/mcp"
 LAUNCHD_LABEL="com.telegram-mcp.server"
 LOG_ERR="$HOME/Library/Logs/telegram-mcp/server.err.log"
@@ -66,6 +69,22 @@ else
   status="$(grep -E 'Status|Issue' <<<"$mcp_get" | sed 's/^ */  /')"
   echo "${status:-  registered (no status line reported)}"
   grep -q 'Connected' <<<"$mcp_get" || fail=1
+fi
+
+# 4. codex — registration status. A missing CLI is not a failure (Claude-only setups).
+#    `codex mcp get` prints static config; there is no connection probe, so "enabled"
+#    is the strongest signal available.
+echo "codex  :"
+if ! command -v "$CODEX" >/dev/null 2>&1; then
+  echo "  codex CLI not found — skipped"
+elif ! codex_get="$("$CODEX" mcp get "$MCP_NAME" 2>/dev/null)" || [[ -z "$codex_get" ]]; then
+  echo "  $MCP_NAME not registered — run 'make use-http-codex'"
+  fail=1
+elif grep -qE '^[[:space:]]*enabled:[[:space:]]*true' <<<"$codex_get"; then
+  echo "  registered and enabled ($(grep -E '^[[:space:]]*transport:' <<<"$codex_get" | awk '{print $2}'))"
+else
+  echo "  registered but DISABLED — run 'make use-http-codex'"
+  fail=1
 fi
 
 echo
