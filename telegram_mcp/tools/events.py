@@ -104,7 +104,7 @@ def _default_feed_file() -> Path:
 
 def feed_file_path() -> Path:
     override = os.getenv(_FEED_FILE_ENV)
-    return Path(override) if override else _default_feed_file()
+    return expand_env_path(override) if override else _default_feed_file()
 
 
 def feed_enabled() -> bool:

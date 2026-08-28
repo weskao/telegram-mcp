@@ -1039,6 +1039,17 @@ def updates_message_id(updates: Any) -> Optional[int]:
     return None
 
 
+def expand_env_path(raw: str) -> Path:
+    """Expand `~` and `$VAR` in a path that came from `.env` or the environment.
+
+    `.env` values never pass through a shell, so `$HOME/x` would otherwise be
+    taken literally and fail as a missing directory. Deliberately NOT used for
+    paths supplied by the MCP client: expanding server-side variables into
+    client-controlled input would leak environment values into path resolution.
+    """
+    return Path(os.path.expandvars(raw)).expanduser()
+
+
 _ALIASES_ENV = "TELEGRAM_ALIASES_FILE"
 # Pre-XDG location; read as a fallback so existing installs keep resolving, never written.
 _LEGACY_ALIASES_FILE = Path(__file__).resolve().parent.parent / "aliases.json"
@@ -1053,7 +1064,7 @@ def aliases_file_path() -> Path:
     """Runtime data location, never the install directory (may be read-only)."""
     override = os.getenv(_ALIASES_ENV)
     if override:
-        return Path(override)
+        return expand_env_path(override)
     base = os.getenv("XDG_STATE_HOME") or Path.home() / ".local" / "state"
     return Path(base) / "telegram-mcp" / "aliases.json"
 
@@ -2035,7 +2046,7 @@ def _configure_allowed_roots_from_cli(argv: Optional[List[str]] = None) -> None:
         raw_root = raw_root.strip()
         if not raw_root:
             continue
-        root = Path(raw_root).expanduser()
+        root = expand_env_path(raw_root)
         if not root.exists():
             raise SystemExit(f"Allowed root does not exist: {root}")
         resolved = root.resolve(strict=True)

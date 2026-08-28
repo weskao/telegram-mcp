@@ -839,6 +839,19 @@ def test_configure_allowed_roots_merges_env_and_cli(tmp_path, monkeypatch):
     assert runtime.SERVER_ALLOWED_ROOTS == [cli_root.resolve(), env_root.resolve()]
 
 
+def test_configure_allowed_roots_expands_env_vars_and_tilde(tmp_path, monkeypatch):
+    """`.env` values never pass through a shell, so `$VAR`/`~` must expand here."""
+    root = tmp_path / "roots"
+    root.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TG_TEST_BASE", str(tmp_path))
+    monkeypatch.setenv("TELEGRAM_MCP_ALLOWED_ROOTS", "$TG_TEST_BASE/roots,~/roots")
+
+    runtime._configure_allowed_roots_from_cli([])
+
+    assert runtime.SERVER_ALLOWED_ROOTS == [root.resolve()]
+
+
 def test_main_compatibility_wrappers_are_exported():
     assert main.send_message is not None
     assert main.validate_id is runtime.validate_id

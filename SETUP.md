@@ -198,6 +198,8 @@ http://127.0.0.1:8765/mcp
 TELEGRAM_MCP_SUMMARY_PROJECT="/absolute/path/to/project" bash scripts/setup.sh
 ```
 
+> `TELEGRAM_MCP_SUMMARY_PROJECT` **只有 `scripts/setup.sh` 會讀，而且必須在命令列上傳入**。`setup.sh` 不會載入 `.env`，寫進 `.env` 不會有任何作用；server 端也不使用這個變數。指定的路徑若不存在或沒有 `.claude/commands/telegram-summary.md`，setup.sh 會靜默跳過、不影響其他安裝步驟。
+
 若未設定，或專案位於其他位置，也可以手動只授權該專案的 `docs/chat/`：
 
 ```bash
@@ -334,7 +336,7 @@ MCP_PORT=8765
 TELEGRAM_MCP_ALLOWED_ROOTS="~/Downloads/telegram_mcp_files,/absolute/path/to/project/docs/chat"
 ```
 
-多個目錄以逗號分隔。每個目錄必須已存在，server 啟動時會解析真實路徑；任何不存在的項目都會讓啟動立即失敗，避免設定錯字意外放寬到其他位置。修改後需重新啟動 launchd server。
+多個目錄以逗號分隔，`~` 與 `$HOME`／`$VAR` 都會展開。每個目錄必須已存在，server 啟動時會解析真實路徑；任何不存在的項目都會讓啟動立即失敗（log 顯示 `Allowed root does not exist: <path>`），避免設定錯字意外放寬到其他位置。修改後需重新啟動 launchd server。
 
 > stdio 模式使用者：在 `.mcp.json` 的 `env` 區塊加入對應變數即可，不需要 `.env` 檔。
 
