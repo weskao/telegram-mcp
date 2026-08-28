@@ -25,9 +25,9 @@ UV_BIN="$(command -v uv)"
 # tree that happens to contain credentials, signing keys or the server's own
 # Telegram session file.
 #
-#   TELEGRAM_MCP_ALLOWED_ROOTS="/path/one:/path/two" bash scripts/install-launchd.sh
+#   TELEGRAM_MCP_ALLOWED_ROOTS="/path/one,/path/two" bash scripts/install-launchd.sh
 #
-# Colon-separated so paths may contain spaces. The choice is remembered in
+# Comma-separated so paths may contain spaces. The choice is remembered in
 # ROOTS_FILE, so a later re-install without the variable keeps it instead of
 # silently disabling the file-path tools again. Set the variable to an empty
 # string (as opposed to leaving it unset) to clear the saved roots.
@@ -42,7 +42,7 @@ if [[ -n "${TELEGRAM_MCP_ALLOWED_ROOTS+set}" ]]; then
   if [[ -n "$TELEGRAM_MCP_ALLOWED_ROOTS" ]]; then
     while IFS= read -r _root || [[ -n "$_root" ]]; do
       [[ -n "$_root" ]] && ALLOWED_ROOTS+=("$_root")
-    done < <(printf '%s' "$TELEGRAM_MCP_ALLOWED_ROOTS" | tr ':' '\n')
+    done < <(printf '%s' "$TELEGRAM_MCP_ALLOWED_ROOTS" | tr ',' '\n')
   fi
 elif [[ -f "$ROOTS_FILE" ]]; then
   while IFS= read -r _root || [[ -n "$_root" ]]; do
@@ -89,6 +89,7 @@ if [[ -z "\$TELEGRAM_MCP_TOKEN" ]]; then
 fi
 export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_STRING TELEGRAM_MCP_TOKEN
 launchctl setenv TELEGRAM_MCP_TOKEN "\$TELEGRAM_MCP_TOKEN"
+launchctl setenv TELEGRAM_MCP_HTTP_VALUE "\$TELEGRAM_MCP_TOKEN"
 "${UV_BIN}" --directory "${PROJECT_DIR}" run telegram-mcp --transport http --port 8765${ROOTS_ARGS} &
 SERVER_PID=\$!
 for i in \$(seq 1 60); do
@@ -139,6 +140,7 @@ fi
 # Codex instances started after this installer inherit it; the token is never
 # written to Codex configuration.
 launchctl setenv TELEGRAM_MCP_TOKEN "$TOKEN"
+launchctl setenv TELEGRAM_MCP_HTTP_VALUE "$TOKEN"
 
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH"
@@ -151,7 +153,7 @@ if [[ ${#ALLOWED_ROOTS[@]} -gt 0 ]]; then
   printf '[telegram-mcp]   %s\n' "${ALLOWED_ROOTS[@]}"
 else
   echo "[telegram-mcp] File-path tools are DISABLED (no allowed roots)."
-  echo "[telegram-mcp] Enable with: TELEGRAM_MCP_ALLOWED_ROOTS=\"/path/one:/path/two\" bash scripts/install-launchd.sh"
+  echo "[telegram-mcp] Enable with: TELEGRAM_MCP_ALLOWED_ROOTS=\"/path/one,/path/two\" bash scripts/install-launchd.sh"
 fi
 echo "[telegram-mcp] Installed MCP clients were configured for Streamable HTTP; missing CLIs were skipped with follow-up commands above"
 echo "[telegram-mcp] To check status: launchctl list | grep telegram-mcp"

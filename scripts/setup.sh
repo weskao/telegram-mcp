@@ -8,6 +8,7 @@
 #   - Installs uv if missing
 #   - Prompts for Telegram API ID, API Hash, and phone verification (session string)
 #   - Stores all credentials in macOS Keychain
+#   - Configures a dedicated allowed root for local file tools
 #   - Installs and starts the launchd Streamable HTTP server
 #   - Registers each installed Claude Code / Codex client for authenticated Streamable HTTP
 #
@@ -131,6 +132,45 @@ echo
 # ── Step 3: launchd service ───────────────────────────────────────────────────
 
 echo "步驟 3：安裝 Streamable HTTP launchd 常駐服務…"
+
+# Stateless Streamable HTTP cannot request MCP Roots from the client. Give it
+# narrow exchange roots instead of exposing the user's home or workspace.
+ROOTS_FILE="$HOME/Library/Application Support/telegram-mcp/allowed-roots"
+if [[ -z "${TELEGRAM_MCP_ALLOWED_ROOTS+set}" ]]; then
+  DEFAULT_ALLOWED_ROOT="$HOME/Downloads/telegram_mcp_files"
+  mkdir -p "$DEFAULT_ALLOWED_ROOT"
+  if [[ -s "$ROOTS_FILE" ]]; then
+    TELEGRAM_MCP_ALLOWED_ROOTS="$(awk 'NF { printf "%s%s", separator, $0; separator="," }' "$ROOTS_FILE")"
+  else
+    TELEGRAM_MCP_ALLOWED_ROOTS="$DEFAULT_ALLOWED_ROOT"
+  fi
+  if ! tr ',' '\n' <<<"$TELEGRAM_MCP_ALLOWED_ROOTS" | grep -Fqx "$DEFAULT_ALLOWED_ROOT"; then
+    TELEGRAM_MCP_ALLOWED_ROOTS="$TELEGRAM_MCP_ALLOWED_ROOTS,$DEFAULT_ALLOWED_ROOT"
+  fi
+
+  # telegram-summary writes attachments below docs/chat/. Detect either an
+  # embedded telegram-mcp checkout or an explicitly configured project root,
+  # then grant only docs/chat rather than the repository that contains it.
+  SUMMARY_PROJECT_ROOT="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ ! -f "$SUMMARY_PROJECT_ROOT/.claude/commands/telegram-summary.md" && -n "${TELEGRAM_MCP_SUMMARY_PROJECT:-}" ]]; then
+    SUMMARY_PROJECT_ROOT="$TELEGRAM_MCP_SUMMARY_PROJECT"
+  fi
+  if [[ -f "$SUMMARY_PROJECT_ROOT/.claude/commands/telegram-summary.md" ]]; then
+    SUMMARY_CHAT_ROOT="$SUMMARY_PROJECT_ROOT/docs/chat"
+    mkdir -p "$SUMMARY_CHAT_ROOT"
+    if ! tr ',' '\n' <<<"$TELEGRAM_MCP_ALLOWED_ROOTS" | grep -Fqx "$SUMMARY_CHAT_ROOT"; then
+      TELEGRAM_MCP_ALLOWED_ROOTS="$TELEGRAM_MCP_ALLOWED_ROOTS,$SUMMARY_CHAT_ROOT"
+    fi
+  fi
+
+  export TELEGRAM_MCP_ALLOWED_ROOTS
+  echo "  ✅ 檔案工具 allowed roots："
+  tr ',' '\n' <<<"$TELEGRAM_MCP_ALLOWED_ROOTS" | sed 's/^/      /'
+elif [[ -n "${TELEGRAM_MCP_ALLOWED_ROOTS:-}" ]]; then
+  echo "  ✅ 使用 TELEGRAM_MCP_ALLOWED_ROOTS 指定的目錄"
+else
+  echo "  ℹ️  明確停用檔案工具（TELEGRAM_MCP_ALLOWED_ROOTS 為空）"
+fi
 bash "$SCRIPT_DIR/install-launchd.sh"
 echo
 
@@ -256,7 +296,15 @@ if [[ "$VERIFY_OK" == 1 ]]; then
   fi
 fi
 
-# 6d. 失敗時給出可行動的診斷
+# 6d. file-path tools 是否有 server-side roots
+if [[ -s "$ROOTS_FILE" ]]; then
+  echo "  ✅ 檔案工具 allowed roots："
+  sed 's/^/      /' "$ROOTS_FILE"
+else
+  echo "  ⚠️  未設定 allowed roots；download_media、send_file 等檔案工具已停用"
+fi
+
+# 6e. 失敗時給出可行動的診斷
 if [[ "$VERIFY_OK" != 1 ]]; then
   echo
   echo "  ── 診斷 ──"

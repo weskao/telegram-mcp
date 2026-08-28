@@ -13,7 +13,7 @@
 
 > 📖 **初次設定？請直接照 [SETUP.md](SETUP.md) 逐步操作**，涵蓋 uv 安裝、Telegram API 憑證申請、產生 Session String、環境設定到掛載 Claude 的完整流程。
 
-回訪速查：一鍵安裝並登記到 Claude user scope（所有專案共用）。
+回訪速查：一鍵安裝並登記到 Claude user scope（所有專案共用）。首次安裝會建立 `~/Downloads/telegram_mcp_files` 作為專用檔案交換目錄。
 
 ```bash
 bash scripts/setup.sh
@@ -29,9 +29,9 @@ bash scripts/setup.sh
 
 ### 🚀 一鍵安裝與常駐 HTTP 服務
 
-- `bash scripts/setup.sh`：一次安裝、將 bearer token 存入 Keychain，並把 Claude Code 與 Codex 設為連向同一個本機 HTTP server。
+- `bash scripts/setup.sh`：一次安裝、將 bearer token 存入 Keychain、建立專用 allowed root `~/Downloads/telegram_mcp_files`，偵測內嵌 telegram-mcp 專案或 `TELEGRAM_MCP_SUMMARY_PROJECT` 後只額外授權其 `docs/chat/`，並把 Claude Code 與 Codex 設為連向同一個本機 HTTP server。
 - `scripts/install-launchd.sh`：安裝 launchd 服務並開機自啟，讓 HTTP server 常駐。
-- launchd 用的 stateless streamable HTTP 傳輸無法向 client 發出 Roots 請求，因此一律 fallback 回 server CLI roots（除非設定 `TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=0`），不會等待或逾時。其他傳輸模式下，client 接受了 Roots 請求卻不回應，會在 `TELEGRAM_ROOTS_REQUEST_TIMEOUT_SECONDS`（預設 `10` 秒）後失敗，而非卡住；同樣受上述 opt-in 控制是否 fallback。修改後需重啟服務才會生效。
+- launchd 用的 stateless streamable HTTP 傳輸無法向 client 發出 Roots 請求，因此檔案工具只能使用啟動時明確授權的 server roots；沒有 roots 時，`download_media`、`send_file` 等工具會安全停用。`TELEGRAM_MCP_ALLOWED_ROOTS="~/Downloads/telegram_mcp_files,<project_root>/docs/chat"` 可放在 `.env`，請將 `<project_root>` 替換成該電腦的實際絕對路徑；它會與 installer／CLI roots 合併。`TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1` 本身不會建立 root。`telegram-summary` 解析圖片時優先使用不落地的 `open_photo`，需要保存附件時使用授權的專案 `docs/chat/`。詳見 [SETUP.md 的 allowed roots 說明](SETUP.md#檔案交換目錄allowed-roots)。
 
 ### 🔐 Keychain 優先的 Session 儲存
 

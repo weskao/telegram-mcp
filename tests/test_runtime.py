@@ -810,6 +810,7 @@ def test_roots_unsupported_detection():
 
 
 def test_configure_allowed_roots_from_cli_updates_runtime_and_main_alias(tmp_path, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_MCP_ALLOWED_ROOTS", raising=False)
     root = tmp_path / "root"
     root.mkdir()
 
@@ -821,6 +822,21 @@ def test_configure_allowed_roots_from_cli_updates_runtime_and_main_alias(tmp_pat
 
     with pytest.raises(SystemExit, match="Allowed root does not exist"):
         runtime._configure_allowed_roots_from_cli([str(tmp_path / "missing")])
+
+
+def test_configure_allowed_roots_merges_env_and_cli(tmp_path, monkeypatch):
+    cli_root = tmp_path / "cli"
+    env_root = tmp_path / "env"
+    cli_root.mkdir()
+    env_root.mkdir()
+    monkeypatch.setenv(
+        "TELEGRAM_MCP_ALLOWED_ROOTS",
+        f" {env_root}, {cli_root} ",
+    )
+
+    runtime._configure_allowed_roots_from_cli([str(cli_root)])
+
+    assert runtime.SERVER_ALLOWED_ROOTS == [cli_root.resolve(), env_root.resolve()]
 
 
 def test_main_compatibility_wrappers_are_exported():

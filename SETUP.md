@@ -31,7 +31,7 @@ cd telegram-mcp
 
 <!-- -->
 
-> **預設安裝方式：** clone 完成後可直接執行 `bash scripts/setup.sh`。script 會安裝缺少的 uv、引導你完成 Telegram 憑證與 session string、安裝 launchd 常駐 Streamable HTTP server，並把 Claude Code 與 Codex MCP 設定指向 `http://127.0.0.1:8765/mcp`。
+> **預設安裝方式：** clone 完成後可直接執行 `bash scripts/setup.sh`。script 會安裝缺少的 uv、引導你完成 Telegram 憑證與 session string、建立專用檔案交換目錄 `~/Downloads/telegram_mcp_files`、安裝 launchd 常駐 Streamable HTTP server，並把 Claude Code 與 Codex MCP 設定指向 `http://127.0.0.1:8765/mcp`。
 >
 > **常用指令：** 可執行 `make list` 查看所有 Makefile 指令。HTTP 模式用 `make start` 或 `make start-http` 前景啟動 server，再用 `make use-http` 將 Claude Code 與 Codex MCP 設定切到 `http://127.0.0.1:8765/mcp`。
 
@@ -93,7 +93,7 @@ uv run telegram-mcp-generate-session
 bash scripts/setup.sh
 ```
 
-這會自動完成 Keychain 寫入、launchd Streamable HTTP 常駐服務安裝，以及 Claude Code／Codex MCP 設定。以下手動設定只在不使用 `setup.sh` 時需要。
+這會自動完成 Keychain 寫入、建立 `~/Downloads/telegram_mcp_files` 作為專用 allowed root、安裝 launchd Streamable HTTP 常駐服務，以及 Claude Code／Codex MCP 設定。以下手動設定只在不使用 `setup.sh` 時需要。
 
 如果你已經把 Telegram 憑證存入 macOS Keychain，並且下列三個 item 都存在，HTTP / SSE / stdio 的 Makefile 啟動指令會自動讀取它們，不需要在 `.env` 填寫 Telegram 憑證：
 
@@ -150,7 +150,8 @@ export TELEGRAM_SESSION_STRING=$(security find-generic-password -a "$USER" -s te
 預設常駐安裝使用 launchd：
 
 ```bash
-bash scripts/install-launchd.sh
+mkdir -p "$HOME/Downloads/telegram_mcp_files"
+TELEGRAM_MCP_ALLOWED_ROOTS="$HOME/Downloads/telegram_mcp_files" bash scripts/install-launchd.sh
 ```
 
 這會啟動 Streamable HTTP server：
@@ -178,6 +179,47 @@ http://127.0.0.1:8765/mcp
 ```
 
 > 預設只綁定 `127.0.0.1`。不要把未加認證的 MCP endpoint 暴露到公開網路。
+
+### 檔案交換目錄（allowed roots）
+
+`send_file`、`download_media`、`upload_file` 與 `open_photo(save_path=...)` 會讀寫本機檔案。Stateless Streamable HTTP 無法向 MCP client 取得 Roots，因此 launchd 必須在啟動 server 時明確傳入 server-side roots；沒有 roots 時，這些工具會預設停用。
+
+`scripts/setup.sh` 會建立並授權專用目錄：
+
+```text
+~/Downloads/telegram_mcp_files
+```
+
+`download_media` 未指定 `file_path` 時會寫入其下的 `downloads/`。`telegram-summary` 解析圖片時應優先使用不落地的 `open_photo`；只有需要保存附件時才使用上述交換目錄。要傳送既有本機檔案，先將檔案複製到交換目錄，避免把整個 home、`Documents` 或 `Workspace` 暴露給共用 HTTP MCP client。
+
+`setup.sh` 也會偵測內嵌 telegram-mcp 的專案，或設定 `TELEGRAM_MCP_SUMMARY_PROJECT` 指向的專案根目錄；找到 `.claude/commands/telegram-summary.md` 時，自動建立並只授權該專案的 `docs/chat/`。因此 `$telegram-summary` 可以把照片保存到預期的 `<對話資料夾>/media/`，而不會取得整個 repository 的權限：
+
+```bash
+TELEGRAM_MCP_SUMMARY_PROJECT="/absolute/path/to/project" bash scripts/setup.sh
+```
+
+若未設定，或專案位於其他位置，也可以手動只授權該專案的 `docs/chat/`：
+
+```bash
+mkdir -p "/absolute/path/to/project/docs/chat"
+TELEGRAM_MCP_ALLOWED_ROOTS="$HOME/Downloads/telegram_mcp_files,/absolute/path/to/project/docs/chat" \
+  bash scripts/install-launchd.sh
+```
+
+如需改用其他目錄，重新安裝 launchd；多個目錄以逗號分隔：
+
+```bash
+TELEGRAM_MCP_ALLOWED_ROOTS="$HOME/Downloads/telegram_mcp_files,$HOME/Downloads" \
+  bash scripts/install-launchd.sh
+```
+
+Installer 設定會保存在 `~/Library/Application Support/telegram-mcp/allowed-roots`，`.env` 的 `TELEGRAM_MCP_ALLOWED_ROOTS` 則會在 server 啟動時額外合併，方便加入其他明確位置。要停用 installer 管理的 roots，可傳入空字串；若 `.env` 仍有 roots，它們仍會保持有效：
+
+```bash
+TELEGRAM_MCP_ALLOWED_ROOTS="" bash scripts/install-launchd.sh
+```
+
+`TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1` 只會允許 fallback，不會建立或授權任何 root；單獨設定它無法啟用檔案工具。變更 roots 後請完全重啟 Claude Code／Codex，使 client 重新連線。
 
 ---
 
@@ -285,6 +327,14 @@ MCP_TRANSPORT=http
 MCP_HOST=127.0.0.1
 MCP_PORT=8765
 ```
+
+檔案工具可讀寫的位置也可直接放在 `.env`；它會與 launchd／CLI roots 合併並去重：
+
+```dotenv
+TELEGRAM_MCP_ALLOWED_ROOTS="~/Downloads/telegram_mcp_files,/absolute/path/to/project/docs/chat"
+```
+
+多個目錄以逗號分隔。每個目錄必須已存在，server 啟動時會解析真實路徑；任何不存在的項目都會讓啟動立即失敗，避免設定錯字意外放寬到其他位置。修改後需重新啟動 launchd server。
 
 > stdio 模式使用者：在 `.mcp.json` 的 `env` 區塊加入對應變數即可，不需要 `.env` 檔。
 

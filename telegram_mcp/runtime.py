@@ -2015,8 +2015,8 @@ def _configure_allowed_roots_from_cli(argv: Optional[List[str]] = None) -> None:
         prog="telegram-mcp",
         add_help=False,
         description=(
-            "Optional positional arguments define server-side allowed roots "
-            "for file-path tools."
+            "Positional arguments and TELEGRAM_MCP_ALLOWED_ROOTS define "
+            "server-side roots for file-path tools."
         ),
     )
     parser.add_argument("allowed_roots", nargs="*")
@@ -2029,8 +2029,12 @@ def _configure_allowed_roots_from_cli(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--port", type=int, default=int(os.getenv("MCP_PORT", "8765")))
     parsed, _unknown = parser.parse_known_args(argv or [])
 
+    env_roots = os.getenv("TELEGRAM_MCP_ALLOWED_ROOTS", "").split(",")
     resolved_roots: List[Path] = []
-    for raw_root in parsed.allowed_roots:
+    for raw_root in [*parsed.allowed_roots, *env_roots]:
+        raw_root = raw_root.strip()
+        if not raw_root:
+            continue
         root = Path(raw_root).expanduser()
         if not root.exists():
             raise SystemExit(f"Allowed root does not exist: {root}")
