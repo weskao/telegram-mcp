@@ -23,6 +23,39 @@ bash scripts/setup.sh
 
 ---
 
+## 🔄 Version migration：allowed roots
+
+若是從舊版升級，請在終端機依序執行以下指令：
+
+```bash
+cd <project_root>
+mkdir -p "$HOME/Downloads/telegram_mcp_files"
+
+# 若舊版目錄存在且新目錄尚未建立，搬移既有下載檔案
+if [[ -d "$HOME/Telegram-MCP-Files" && ! -e "$HOME/Downloads/telegram_mcp_files" ]]; then
+  mv "$HOME/Telegram-MCP-Files" "$HOME/Downloads/telegram_mcp_files"
+fi
+```
+
+接著編輯 `<project_root>/.env`：
+
+```dotenv
+TELEGRAM_MCP_ALLOWED_ROOTS="~/Downloads/telegram_mcp_files,<project_root>/docs/chat"
+```
+
+請把兩個 `<project_root>` 都替換成實際專案絕對路徑。若舊設定使用冒號分隔，必須改成逗號分隔；不要把 `<project_root>` 原樣保留在 `.env`。
+
+重新安裝並重啟 launchd：
+
+```bash
+bash scripts/install-launchd.sh
+launchctl kickstart -k "gui/$(id -u)/com.telegram-mcp.server"
+```
+
+完成後，`download_media` 未指定路徑時會使用 `~/Downloads/telegram_mcp_files/downloads/`；`telegram-summary` 的附件則保存於 `<project_root>/docs/chat/<對話名稱>/media/`。
+
+---
+
 ## ✨ 這個 Fork 多了什麼
 
 相對於上游，本 fork 額外提供：
