@@ -11,6 +11,7 @@ except UnsafeInstallationError as exc:
 
 from telegram_mcp import runtime
 from telethon.errors import AuthKeyDuplicatedError
+from telegram_mcp import transcription
 from telegram_mcp.runtime import *
 from telegram_mcp.singleton import (
     DEFAULT_GRACE_SECONDS,
@@ -207,7 +208,8 @@ def main() -> None:
     # Fork blocklist (default dangerous-tool removal) AND upstream read-only
     # exposure mode are complementary — apply both before serving.
     _apply_tool_disable_list()
-    _apply_exposed_tools_mode()
+    runtime._apply_exposed_tools_mode()
+    transcription.validate_transcription_config()
     asyncio.run(_main())
 
 

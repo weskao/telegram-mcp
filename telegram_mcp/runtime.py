@@ -24,7 +24,7 @@ from mcp.types import Annotations, ImageContent, TextContent, ToolAnnotations
 from mcp.shared.exceptions import McpError
 from pythonjsonlogger import jsonlogger
 from telethon import TelegramClient, functions, types, utils
-from telethon.errors import AuthKeyDuplicatedError
+from telethon.errors import AuthKeyDuplicatedError, FloodWaitError
 from telethon.sessions import StringSession
 from telethon.tl.types import (
     User,
@@ -58,7 +58,13 @@ from telegram_mcp.singleton import try_lock_exclusive
 
 from functools import wraps
 import telethon.errors.rpcerrorlist
-from sanitize import sanitize_user_content, sanitize_name, sanitize_dict, format_tool_result, format_date
+from sanitize import (
+    sanitize_user_content,
+    sanitize_name,
+    sanitize_dict,
+    format_tool_result,
+    format_date,
+)
 from starlette.requests import Request
 from starlette.responses import Response
 from telegram_mcp.client_identity import client_identity_kwargs
@@ -114,6 +120,31 @@ def get_entity_filter_type(entity: Any) -> Optional[str]:
     return None
 
 
+def parse_schedule_date(
+    schedule_date: Union[str, int],
+) -> tuple[Optional[datetime], Optional[str]]:
+    """Return (datetime, None) for a usable schedule_date, or (None, error message).
+
+    Accepts an ISO-8601 string or a Unix timestamp; naive datetimes are UTC.
+    """
+    try:
+        if isinstance(schedule_date, int):
+            dt = datetime.fromtimestamp(schedule_date, tz=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(str(schedule_date).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError) as exc:
+        return None, f"schedule_date could not be parsed ({schedule_date!r}): {exc}"
+
+    now = datetime.now(timezone.utc)
+    if dt <= now:
+        return None, (
+            f"schedule_date must be in the future (got {dt.isoformat()}, now {now.isoformat()})."
+        )
+    return dt, None
+
+
 load_dotenv()
 
 TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID"))
@@ -146,11 +177,13 @@ class BearerTokenMiddleware:
                 break
         expected = b"Bearer " + self._token.encode("ascii")
         if auth != expected:
-            await send({
-                "type": "http.response.start",
-                "status": 401,
-                "headers": [(b"content-type", b"text/plain; charset=utf-8")],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+                }
+            )
             await send({"type": "http.response.body", "body": b"Unauthorized"})
             return
         await self.app(scope, receive, send)
@@ -374,14 +407,34 @@ def _build_proxy_for_label(label: str) -> tuple[Optional[Any], Optional[Any]]:
     return proxy, None
 
 
+def _get_flood_sleep_threshold() -> int:
+    """Read TELEGRAM_FLOOD_SLEEP_THRESHOLD from environment (default: 60)."""
+    raw = os.getenv("TELEGRAM_FLOOD_SLEEP_THRESHOLD", "60").strip()
+    try:
+        val = int(raw)
+        if val < 0:
+            logger.warning(
+                f"Negative TELEGRAM_FLOOD_SLEEP_THRESHOLD='{raw}' clamped to 0 (fail-fast mode)"
+            )
+            return 0
+        return val
+    except ValueError:
+        logger.warning(
+            f"Invalid TELEGRAM_FLOOD_SLEEP_THRESHOLD='{raw}', falling back to default 60s"
+        )
+        return 60
+
+
 def _build_client(session: Any, label: str) -> TelegramClient:
-    """Construct a ``TelegramClient`` honoring per-label proxy configuration."""
+    """Construct a ``TelegramClient`` honoring per-label proxy and flood sleep configuration."""
     proxy, connection = _build_proxy_for_label(label)
     kwargs: dict[str, Any] = {}
     if proxy is not None:
         kwargs["proxy"] = proxy
     if connection is not None:
         kwargs["connection"] = connection
+    # Read flood sleep threshold dynamically so runtime env changes take effect
+    kwargs["flood_sleep_threshold"] = _get_flood_sleep_threshold()
     kwargs.update(client_identity_kwargs())
     return TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH, **kwargs)
 
@@ -768,6 +821,23 @@ class ErrorCategory(str, Enum):
     FOLDER = "FOLDER"
 
 
+def _is_flood_wait(error: Exception) -> bool:
+    """True for Telethon FloodWaitError."""
+    try:
+        return isinstance(error, FloodWaitError)
+    except Exception:  # telethon missing or moved — not this helper's problem
+        return False
+
+
+def _is_schema_drift(error: Exception) -> bool:
+    """True for TypeNotFoundError — the installed TL schema is older than what the server sends."""
+    try:
+        from telethon.errors.common import TypeNotFoundError
+    except Exception:  # telethon missing or moved — not this helper's problem
+        return False
+    return isinstance(error, TypeNotFoundError)
+
+
 def log_and_format_error(
     function_name: str,
     error: Exception,
@@ -814,6 +884,23 @@ def log_and_format_error(
     # Format the additional context parameters
     context = ", ".join(f"{k}={v}" for k, v in kwargs.items())
 
+    # Telegram FloodWait (Rate Limiting) must be explicitly formatted for LLM agents.
+    # LLMs will blindly retry generic errors, escalating the flood penalty and risking bans.
+    # We log at WARNING level and return explicit wait duration with a strict no-retry directive.
+    if _is_flood_wait(error):
+        seconds = getattr(error, "seconds", None) or 0
+        logger.warning(
+            f"Telegram FloodWait in {function_name} ({context}) - "
+            f"Rate limited for {seconds}s - Code: {error_code}"
+        )
+        if user_message:
+            return user_message
+        wait_clause = f"{seconds} seconds" if seconds > 0 else "an unknown duration"
+        return (
+            f"Rate limit exceeded (FloodWait): Telegram requires waiting {wait_clause} "
+            f"before repeating this operation. Do NOT retry immediately (code: {error_code})."
+        )
+
     # Log the full technical error
     logger.error(f"Error in {function_name} ({context}) - Code: {error_code}", exc_info=True)
 
@@ -835,15 +922,6 @@ def log_and_format_error(
         )
 
     return f"An error occurred (code: {error_code}). Check mcp_errors.log for details."
-
-
-def _is_schema_drift(error: Exception) -> bool:
-    """True for TypeNotFoundError — the installed TL schema is older than what the server sends."""
-    try:
-        from telethon.errors.common import TypeNotFoundError
-    except Exception:  # telethon missing or moved — not this helper's problem
-        return False
-    return isinstance(error, TypeNotFoundError)
 
 
 def validate_id(*param_names_to_validate):
@@ -1759,9 +1837,7 @@ def _server_roots_fallback_explicitly_disabled(value: Optional[str] = None) -> b
     explicit false is a decision that must not be overridden. An unparseable
     value is not treated as an explicit "off".
     """
-    raw_value = (
-        os.getenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK") if value is None else value
-    )
+    raw_value = os.getenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK") if value is None else value
     if raw_value is None:
         return False
     # Only recognised negatives count. _parse_bool_env maps anything it does not
@@ -1787,10 +1863,7 @@ def _client_roots_channel_unavailable() -> Optional[str]:
     monkeypatch the flags and would not catch that on their own.
     """
     if _transport == "http" and getattr(mcp.settings, "stateless_http", False):
-        return (
-            "stateless streamable HTTP transport cannot carry server->client "
-            "requests"
-        )
+        return "stateless streamable HTTP transport cannot carry server->client " "requests"
     return None
 
 
@@ -1836,8 +1909,7 @@ async def _get_effective_allowed_roots_with_status(
             )
             return fallback_roots, ROOTS_STATUS_SERVER_FALLBACK
         logger.error(
-            "MCP roots request timed out after %ss; disabling file-path tools "
-            "for safety.",
+            "MCP roots request timed out after %ss; disabling file-path tools " "for safety.",
             ROOTS_REQUEST_TIMEOUT_SECONDS,
         )
         return [], ROOTS_STATUS_TIMEOUT

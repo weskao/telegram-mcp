@@ -28,48 +28,134 @@ PHOTO_SHEET_MAXIMUM_TILES = 12
 #   TELEGRAM_DOWNLOAD_BLOCKED_EXT="exe,msi,..."
 # When an env var is set (non-empty), it REPLACES the corresponding default
 # list. Leading dots are stripped, entries are lowercased and de-duped.
-_DEFAULT_DOWNLOAD_ALLOWED_EXT = frozenset({
-    # images (Photo / Sticker / iOS HEIC original)
-    "jpg", "jpeg", "png", "webp", "heic", "heif", "gif",
-    # video (Video / Animation / Video sticker)
-    "mp4", "mov", "webm",
-    # audio (Audio / Voice)
-    "mp3", "m4a", "ogg",
-    # documents
-    "pdf", "txt", "md", "csv",
-    # office (macro-free; .docm / .xlsm / .pptm are blocked)
-    "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-})
-_DEFAULT_DOWNLOAD_BLOCKED_EXT = frozenset({
-    # executables
-    "exe", "msi", "bat", "cmd", "sh", "bash", "zsh", "ps1", "vbs", "vbe",
-    "js", "jse", "wsf", "wsh", "scr", "com", "pif", "cpl", "reg",
-    "app", "dmg", "pkg", "mpkg", "deb", "rpm", "apk", "ipa",
-    "appimage", "run", "bin",
-    # code / scripts
-    "mjs", "cjs", "py", "pyc", "pyo", "rb", "pl", "php", "phtml",
-    "jar", "war", "ear", "class", "lua", "tcl",
-    # macro-enabled office
-    "docm", "xlsm", "pptm", "dotm", "xltm", "potm",
-    # script-embeddable / renderable
-    "svg", "html", "htm", "xhtml", "xsl", "xslt", "mht", "mhtml",
-    # shortcuts / containers (can dereference to executables)
-    "lnk", "url", "desktop", "webloc", "inf", "iso", "vhd", "vhdx",
-    # archives (may hide any of the above)
-    "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz",
-    "cab", "ace", "arj", "lzh",
-})
+_DEFAULT_DOWNLOAD_ALLOWED_EXT = frozenset(
+    {
+        # images (Photo / Sticker / iOS HEIC original)
+        "jpg",
+        "jpeg",
+        "png",
+        "webp",
+        "heic",
+        "heif",
+        "gif",
+        # video (Video / Animation / Video sticker)
+        "mp4",
+        "mov",
+        "webm",
+        # audio (Audio / Voice)
+        "mp3",
+        "m4a",
+        "ogg",
+        # documents
+        "pdf",
+        "txt",
+        "md",
+        "csv",
+        # office (macro-free; .docm / .xlsm / .pptm are blocked)
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+        "ppt",
+        "pptx",
+    }
+)
+_DEFAULT_DOWNLOAD_BLOCKED_EXT = frozenset(
+    {
+        # executables
+        "exe",
+        "msi",
+        "bat",
+        "cmd",
+        "sh",
+        "bash",
+        "zsh",
+        "ps1",
+        "vbs",
+        "vbe",
+        "js",
+        "jse",
+        "wsf",
+        "wsh",
+        "scr",
+        "com",
+        "pif",
+        "cpl",
+        "reg",
+        "app",
+        "dmg",
+        "pkg",
+        "mpkg",
+        "deb",
+        "rpm",
+        "apk",
+        "ipa",
+        "appimage",
+        "run",
+        "bin",
+        # code / scripts
+        "mjs",
+        "cjs",
+        "py",
+        "pyc",
+        "pyo",
+        "rb",
+        "pl",
+        "php",
+        "phtml",
+        "jar",
+        "war",
+        "ear",
+        "class",
+        "lua",
+        "tcl",
+        # macro-enabled office
+        "docm",
+        "xlsm",
+        "pptm",
+        "dotm",
+        "xltm",
+        "potm",
+        # script-embeddable / renderable
+        "svg",
+        "html",
+        "htm",
+        "xhtml",
+        "xsl",
+        "xslt",
+        "mht",
+        "mhtml",
+        # shortcuts / containers (can dereference to executables)
+        "lnk",
+        "url",
+        "desktop",
+        "webloc",
+        "inf",
+        "iso",
+        "vhd",
+        "vhdx",
+        # archives (may hide any of the above)
+        "zip",
+        "rar",
+        "7z",
+        "tar",
+        "gz",
+        "tgz",
+        "bz2",
+        "xz",
+        "cab",
+        "ace",
+        "arj",
+        "lzh",
+    }
+)
 
 
 def _parse_ext_env(var_name: str, default: frozenset) -> frozenset:
     raw = os.environ.get(var_name, "").strip()
     if not raw:
         return default
-    parsed = {
-        token.strip().lower().lstrip(".")
-        for token in raw.split(",")
-        if token.strip()
-    }
+    parsed = {token.strip().lower().lstrip(".") for token in raw.split(",") if token.strip()}
     return frozenset(parsed)
 
 
@@ -115,6 +201,7 @@ async def send_file(
     file_path: Union[str, List[str]],
     caption: str = None,
     topic_id: Optional[int] = None,
+    schedule_date: Union[str, int, None] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -127,6 +214,10 @@ async def send_file(
         caption: Optional caption for the file or media group.
         topic_id: Optional forum topic ID (from list_topics). Sends into that topic
             in a forum-enabled community/supergroup. Also works as reply_to for a message.
+        schedule_date: Optional. When set, the file is placed in the chat's
+            scheduled queue instead of being sent now. Either an ISO-8601 string
+            (e.g. "2026-05-01T14:30:00" or "2026-05-01T14:30:00Z") or a Unix
+            timestamp (int). Naive datetimes are treated as UTC.
     """
     try:
         if isinstance(file_path, list):
@@ -135,9 +226,16 @@ async def send_file(
                 file_paths=file_path,
                 caption=caption,
                 topic_id=topic_id,
+                schedule_date=schedule_date,
                 ctx=ctx,
                 account=account,
             )
+
+        dt = None
+        if schedule_date is not None:
+            dt, schedule_error = parse_schedule_date(schedule_date)
+            if schedule_error:
+                return schedule_error
 
         cl = get_client(account)
         safe_path, path_error = await _resolve_readable_file_path(
@@ -148,7 +246,11 @@ async def send_file(
         if path_error:
             return path_error
         entity = await resolve_entity(chat_id, cl)
-        sent = await cl.send_file(entity, str(safe_path), caption=caption, reply_to=topic_id)
+        sent = await cl.send_file(
+            entity, str(safe_path), caption=caption, reply_to=topic_id, schedule=dt
+        )
+        if dt:
+            return f"File from {safe_path} scheduled for {dt.isoformat()} in chat {chat_id}."
         return f"File sent to chat {chat_id} from {safe_path}.{sent_ids_suffix(sent)}"
     except Exception as e:
         return log_and_format_error(
@@ -158,6 +260,7 @@ async def send_file(
             file_path=file_path,
             caption=caption,
             topic_id=topic_id,
+            schedule_date=str(schedule_date),
         )
 
 
@@ -166,11 +269,18 @@ async def _send_album(
     file_paths: List[str],
     caption: str = None,
     topic_id: Optional[int] = None,
+    schedule_date: Union[str, int, None] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
     if not 2 <= len(file_paths) <= 10:
         return "Albums must contain between 2 and 10 files."
+
+    dt = None
+    if schedule_date is not None:
+        dt, schedule_error = parse_schedule_date(schedule_date)
+        if schedule_error:
+            return schedule_error
 
     cl = get_client(account)
     safe_paths = []
@@ -185,10 +295,12 @@ async def _send_album(
         safe_paths.append(str(safe_path))
 
     entity = await resolve_entity(chat_id, cl)
-    sent = await cl.send_file(entity, safe_paths, caption=caption, reply_to=topic_id)
-    return (
-        f"Album sent to chat {chat_id} with {len(safe_paths)} files.{sent_ids_suffix(sent)}"
-    )
+    sent = await cl.send_file(entity, safe_paths, caption=caption, reply_to=topic_id, schedule=dt)
+    if dt:
+        return (
+            f"Album of {len(safe_paths)} files scheduled for {dt.isoformat()} in chat {chat_id}."
+        )
+    return f"Album sent to chat {chat_id} with {len(safe_paths)} files.{sent_ids_suffix(sent)}"
 
 
 @mcp.tool(
@@ -201,6 +313,7 @@ async def send_album(
     file_paths: List[str],
     caption: str = None,
     topic_id: Optional[int] = None,
+    schedule_date: Union[str, int, None] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -213,6 +326,9 @@ async def send_album(
         caption: Optional caption for the album. Telegram displays it on the first item.
         topic_id: Optional forum topic ID (from list_topics). Sends into that topic
             in a forum-enabled community/supergroup. Also works as reply_to for a message.
+        schedule_date: Optional. When set, the album is placed in the chat's
+            scheduled queue instead of being sent now. Either an ISO-8601 string
+            or a Unix timestamp (int). Naive datetimes are treated as UTC.
     """
     try:
         if not isinstance(file_paths, list):
@@ -222,6 +338,7 @@ async def send_album(
             file_paths=file_paths,
             caption=caption,
             topic_id=topic_id,
+            schedule_date=schedule_date,
             ctx=ctx,
             account=account,
         )
@@ -233,6 +350,7 @@ async def send_album(
             file_paths=file_paths,
             caption=caption,
             topic_id=topic_id,
+            schedule_date=str(schedule_date),
         )
 
 
