@@ -202,5 +202,9 @@ two.png
 aliases.json
 incoming_feed.jsonl
 
+# Voice/video-note transcript cache (plaintext personal-chat text)
+data/transcripts/
+transcript_cache/
+
 # OMC
 .omc/
