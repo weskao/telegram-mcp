@@ -86,6 +86,22 @@ _kc() { security find-generic-password -a "\$USER" -s "\$1" -w 2>/dev/null || tr
 : "\${TELEGRAM_API_HASH:=\$(_kc telegram-api-hash)}"
 : "\${TELEGRAM_SESSION_STRING:=\$(_kc telegram-session-string)}"
 : "\${TELEGRAM_MCP_TOKEN:=\$(_kc telegram-mcp-token)}"
+# Multi-account: load labeled sessions tracked in the telegram-session-labels
+# index (written by session_string_generator.py), mirroring scripts/start.sh so
+# a labeled session works under launchd too. Scoped find-generic-password only;
+# never security dump-keychain.
+_labels="\$(_kc telegram-session-labels)"
+if [[ -n "\$_labels" ]]; then
+  IFS=',' read -ra _label_list <<< "\$_labels"
+  for _label in "\${_label_list[@]}"; do
+    [[ -z "\$_label" ]] && continue
+    _var="TELEGRAM_SESSION_STRING_\$(printf '%s' "\$_label" | tr '[:lower:]' '[:upper:]')"
+    if [[ -z "\${!_var:-}" ]]; then
+      _value="\$(_kc "telegram-session-string-\$_label")"
+      [[ -n "\$_value" ]] && export "\$_var=\$_value"
+    fi
+  done
+fi
 if [[ -z "\$TELEGRAM_MCP_TOKEN" ]]; then
   echo "[telegram-mcp] ERROR: telegram-mcp-token not found in Keychain. Re-run install-launchd.sh." >&2
   exit 1

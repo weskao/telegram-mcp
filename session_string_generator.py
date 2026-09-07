@@ -302,7 +302,7 @@ def main() -> None:
             )
         except EOFError:
             choice = "n"
-        if choice.lower() == "y":
+        if choice.strip().lower() in ("y", "yes"):
             if _store_in_keychain(keychain_service, session_string):
                 if label:
                     _register_session_label(label)
