@@ -1,5 +1,10 @@
 """Media MCP tools."""
 
+import os
+import shutil
+import tempfile
+from uuid import uuid4
+
 from telegram_mcp.runtime import *
 
 from telegram_mcp.contact_sheet import ContactSheetUnavailable, build_contact_sheet
@@ -193,6 +198,19 @@ def _check_download_extension(path: Path) -> Optional[str]:
     return None
 
 
+def _known_media_size(message) -> Optional[int]:
+    """Return Telegram's declared media size when available."""
+    size = getattr(getattr(message, "file", None), "size", None)
+    if isinstance(size, int) and size >= 0:
+        return size
+    size = getattr(getattr(getattr(message, "media", None), "document", None), "size", None)
+    return size if isinstance(size, int) and size >= 0 else None
+
+
+class _DownloadLimitExceeded(Exception):
+    """Stop an in-progress media download once it exceeds the configured limit."""
+
+
 @mcp.tool(annotations=ToolAnnotations(title="Send File", openWorldHint=True, destructiveHint=True))
 @with_account(readonly=False)
 @validate_id("chat_id")
@@ -381,7 +399,12 @@ async def download_media(
         if not msg or not msg.media:
             return "No media found in the specified message."
 
-        default_name = f"telegram_{chat_id}_{message_id}_{int(time.time())}"
+        limit = MAX_FILE_BYTES["download_media"]
+        declared_size = _known_media_size(msg)
+        if declared_size is not None and declared_size > limit:
+            return f"Media is too large for download_media (limit: {limit} bytes)."
+
+        default_name = f"telegram_{chat_id}_{message_id}_{int(time.time())}_{uuid4().hex}"
         out_path, path_error = await _resolve_writable_file_path(
             raw_path=file_path,
             default_filename=default_name,
@@ -391,28 +414,54 @@ async def download_media(
         if path_error:
             return path_error
 
-        # Strip user-supplied extension so Telethon auto-detects the real media type.
-        # If a path with extension is passed (e.g. ticket.jpg), Telethon writes to that
-        # exact path even if the file is actually a PDF. Stripping the suffix lets
-        # Telethon append the correct extension based on the actual file content.
-        out_path_for_dl = out_path.with_suffix("")
-        downloaded = await cl.download_media(msg, file=str(out_path_for_dl))
-        if not downloaded:
-            return f"Download failed for message {message_id}."
+        temp_dir = Path(
+            tempfile.mkdtemp(prefix=".telegram-mcp-download-", dir=str(out_path.parent))
+        )
+        try:
+            staged_name = out_path.with_suffix("").name if out_path.suffix else out_path.name
+            temp_requested_path = temp_dir / staged_name
 
-        final_path = Path(downloaded).resolve(strict=True)
-        roots, roots_error = await _ensure_allowed_roots(ctx, "download_media")
-        if roots_error:
-            return roots_error
-        if not _path_is_within_any_root(final_path, roots):
-            return "Download failed: resulting path is outside allowed roots."
+            def enforce_download_limit(received: int, total: int) -> None:
+                if received > limit or (total and total > limit):
+                    raise _DownloadLimitExceeded
 
-        ext_error = _check_download_extension(final_path)
-        if ext_error:
-            final_path.unlink(missing_ok=True)
-            return ext_error
+            try:
+                downloaded = await cl.download_media(
+                    msg,
+                    file=str(temp_requested_path),
+                    progress_callback=enforce_download_limit,
+                )
+            except _DownloadLimitExceeded:
+                return f"Media is too large for download_media (limit: {limit} bytes)."
 
-        return f"Media downloaded to {final_path}."
+            if not downloaded:
+                return f"Download failed for message {message_id}."
+
+            temp_final_path = Path(downloaded).resolve(strict=True)
+            if temp_final_path.parent != temp_dir.resolve():
+                return "Download failed: resulting temporary path is invalid."
+            if temp_final_path.stat().st_size > limit:
+                return f"Media is too large for download_media (limit: {limit} bytes)."
+
+            final_path = out_path
+            if temp_final_path.suffix:
+                final_path, path_error = await _resolve_writable_file_path(
+                    raw_path=str(out_path.with_suffix(temp_final_path.suffix)),
+                    default_filename=default_name,
+                    ctx=ctx,
+                    tool_name="download_media",
+                )
+                if path_error:
+                    return path_error
+
+            ext_error = _check_download_extension(final_path)
+            if ext_error:
+                return ext_error
+
+            os.replace(temp_final_path, final_path)
+            return f"Media downloaded to {final_path}."
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
     except Exception as e:
         return log_and_format_error(
             "download_media",
@@ -647,10 +696,8 @@ async def get_gif_search(query: str, limit: int = 10, account: str = None) -> st
                         gif_ids.append(msg.media.document.id)
                 return json.dumps(gif_ids, default=json_serializer)
             except Exception as inner_e:
-                # Last resort: Try to fetch from a public bot
-                return f"Could not search GIFs using available methods: {inner_e}"
+                return log_and_format_error("get_gif_search", inner_e, query=query, limit=limit)
     except Exception as e:
-        logger.exception(f"get_gif_search failed (query={query}, limit={limit})")
         return log_and_format_error("get_gif_search", e, query=query, limit=limit)
 
 
@@ -712,8 +759,8 @@ async def list_photos(
     """
     try:
         resolved_source = validate_source(source)
-    except UnknownPhotoSource as unknown_source:
-        return str(unknown_source)
+    except UnknownPhotoSource:
+        return "Unknown photo source. Expected one of: avatars, messages."
 
     try:
         cl = get_client(account)
@@ -831,8 +878,8 @@ async def get_photo_sheet(
     """
     try:
         resolved_source = validate_source(source)
-    except UnknownPhotoSource as unknown_source:
-        return str(unknown_source)
+    except UnknownPhotoSource:
+        return "Unknown photo source. Expected one of: avatars, messages."
 
     try:
         cl = get_client(account)
@@ -853,8 +900,11 @@ async def get_photo_sheet(
 
         try:
             sheet_bytes = build_contact_sheet(tiles, columns)
-        except ContactSheetUnavailable as unavailable:
-            return str(unavailable)
+        except ContactSheetUnavailable:
+            return (
+                "Pillow is required to build contact sheets. Install it with "
+                "`pip install pillow` or `uv sync`."
+            )
 
         return [
             f"{len(tiles)} {resolved_source} photo(s) for {get_marked_id(entity)}, "
