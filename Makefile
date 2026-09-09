@@ -49,7 +49,7 @@ start-stdio: ## Run stdio mode in foreground
 restart: ## Restart the launchd service, wait for MCP_PORT, then run health
 	@set -e; \
 	echo "Restarting $(LAUNCHD_LABEL) ..."; \
-	launchctl kickstart -k "gui/$$(id -u)/$(LAUNCHD_LABEL)"; \
+	launchctl kickstart -k "gui/$$(id -u)/$(LAUNCHD_LABEL)" || { echo "Service not found/running — install it first: bash scripts/install-launchd.sh"; exit 1; }; \
 	echo "Waiting for $(MCP_HOST):$(MCP_PORT) (up to $(RESTART_TIMEOUT)s) ..."; \
 	i=0; until nc -z $(MCP_HOST) $(MCP_PORT); do \
 		i=$$((i+1)); \
