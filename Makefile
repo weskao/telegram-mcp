@@ -14,6 +14,8 @@ ENV_FILE := $(PROJECT_ROOT)/.env
 env_get = $(shell [ -f "$(ENV_FILE)" ] && sed -n 's/^[[:space:]]*$(1)[[:space:]]*=[[:space:]]*\([^[:space:]\#]*\).*/\1/p' "$(ENV_FILE)" | tail -1 | tr -d "\"'")
 
 MCP_NAME ?= telegram-mcp
+LAUNCHD_LABEL ?= com.telegram-mcp.server
+RESTART_TIMEOUT ?= 30
 MCP_HOST ?= $(or $(call env_get,MCP_HOST),127.0.0.1)
 MCP_PORT ?= $(or $(call env_get,MCP_PORT),8765)
 HTTP_URL ?= http://$(MCP_HOST):$(MCP_PORT)/mcp
@@ -23,7 +25,7 @@ CODEX ?= codex
 CODEX_BEARER_ENV ?= TELEGRAM_MCP_TOKEN
 UV ?= uv
 
-.PHONY: list help start start-http start-sse start-stdio health config-check config-check-claude config-check-codex use-http use-http-claude use-http-codex use-sse use-sse-claude use-stdio use-stdio-claude use-stdio-codex sync-upstream-readme
+.PHONY: list help restart start start-http start-sse start-stdio health config-check config-check-claude config-check-codex use-http use-http-claude use-http-codex use-sse use-sse-claude use-stdio use-stdio-claude use-stdio-codex sync-upstream-readme
 
 list:
 	@echo "Available commands:"
@@ -43,6 +45,19 @@ start-sse: ## Run legacy SSE mode in foreground on /sse (MCP_HOST/MCP_PORT or .e
 
 start-stdio: ## Run stdio mode in foreground
 	"$(START_SCRIPT)" --transport stdio
+
+restart: ## Restart the launchd service, wait for MCP_PORT, then run health
+	@set -e; \
+	echo "Restarting $(LAUNCHD_LABEL) ..."; \
+	launchctl kickstart -k "gui/$$(id -u)/$(LAUNCHD_LABEL)"; \
+	echo "Waiting for $(MCP_HOST):$(MCP_PORT) (up to $(RESTART_TIMEOUT)s) ..."; \
+	i=0; until nc -z $(MCP_HOST) $(MCP_PORT); do \
+		i=$$((i+1)); \
+		[ $$i -ge $(RESTART_TIMEOUT) ] && { echo "Timed out waiting for $(MCP_HOST):$(MCP_PORT)"; exit 1; }; \
+		[ $$((i % 5)) -eq 0 ] && echo "  ... still waiting ($${i}s/$(RESTART_TIMEOUT)s), server may still be starting"; \
+		sleep 1; \
+	done
+	@$(MAKE) --no-print-directory health
 
 health: ## Check telegram-mcp health across launchd, HTTP server, and Claude/Codex registration
 	@MCP_HOST=$(MCP_HOST) MCP_PORT=$(MCP_PORT) MCP_NAME=$(MCP_NAME) CLAUDE=$(CLAUDE) CODEX=$(CODEX) "$(HEALTH_SCRIPT)"

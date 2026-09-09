@@ -49,8 +49,10 @@ TELEGRAM_MCP_ALLOWED_ROOTS="~/Downloads/telegram_mcp_files,<project_root>/docs/c
 
 ```bash
 bash scripts/install-launchd.sh
-launchctl kickstart -k "gui/$(id -u)/com.telegram-mcp.server"
+make restart
 ```
+
+`make restart` 會重啟 launchd 服務、等待 `.env` 的 `MCP_PORT`（未設定時為 8765）就緒，再跑 `make health`。
 
 完成後，`download_media` 未指定路徑時會使用 `~/Downloads/telegram_mcp_files/downloads/`；`telegram-summary` 的附件則保存於 `<project_root>/docs/chat/<對話名稱>/media/`。
 
