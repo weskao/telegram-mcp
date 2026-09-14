@@ -1,5 +1,6 @@
 """Media MCP tools."""
 
+import mimetypes
 import os
 import shutil
 import tempfile
@@ -33,6 +34,16 @@ PHOTO_SHEET_MAXIMUM_TILES = 12
 #   TELEGRAM_DOWNLOAD_BLOCKED_EXT="exe,msi,..."
 # When an env var is set (non-empty), it REPLACES the corresponding default
 # list. Leading dots are stripped, entries are lowercased and de-duped.
+#
+# Telegram desktop clients tag .md uploads as the non-standard
+# "text/x-web-markdown", which stdlib mimetypes cannot resolve. Telethon derives
+# the extension from the MIME type alone, so such a file lands with no suffix at
+# all and _check_download_extension rejects it -- even though "md" is on the
+# allowlist below. Registering the mapping keeps the decision MIME-driven rather
+# than trusting the sender-supplied filename. Standard "text/markdown" already
+# resolves; this is the only allowlisted type stdlib cannot map.
+mimetypes.add_type("text/x-web-markdown", ".md")
+
 _DEFAULT_DOWNLOAD_ALLOWED_EXT = frozenset(
     {
         # images (Photo / Sticker / iOS HEIC original)
