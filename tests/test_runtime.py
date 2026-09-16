@@ -1247,3 +1247,71 @@ def test_roots_timeout_env_override_rejects_unusable_values():
     assert runtime._parse_float_env("inf", 10.0) == 10.0
     assert runtime._parse_float_env("Infinity", 10.0) == 10.0
     assert runtime._parse_float_env("nan", 10.0) == 10.0
+
+
+class _HangingRootsSession:
+    """Client that accepts roots/list but never answers it."""
+
+    async def list_roots(self):
+        await asyncio.sleep(3600)
+
+
+def _ctx_with_hanging_list_roots():
+    return SimpleNamespace(session=_HangingRootsSession())
+
+
+def test_roots_request_timeout_parsing(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_ROOTS_TIMEOUT_SECONDS", raising=False)
+    assert runtime._roots_request_timeout() == runtime.ROOTS_REQUEST_TIMEOUT_DEFAULT
+    assert runtime._roots_request_timeout("2.5") == 2.5
+    assert runtime._roots_request_timeout("0") is None
+    assert runtime._roots_request_timeout("-1") is None
+    assert runtime._roots_request_timeout("nonsense") == runtime.ROOTS_REQUEST_TIMEOUT_DEFAULT
+
+
+def test_roots_timeout_preserves_fork_fallback_and_upstream_override(monkeypatch):
+    monkeypatch.setattr(runtime, "ROOTS_REQUEST_TIMEOUT_SECONDS", 2.5)
+    monkeypatch.delenv("TELEGRAM_ROOTS_TIMEOUT_SECONDS", raising=False)
+    assert runtime._roots_request_timeout() == 2.5
+    monkeypatch.setenv("TELEGRAM_ROOTS_TIMEOUT_SECONDS", "1.5")
+    assert runtime._roots_request_timeout() == 1.5
+
+
+def test_remove_user_is_disabled_by_default():
+    assert "remove_user" in runtime._DANGEROUS_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_list_roots_timeout_falls_back_when_opt_in(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.setenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", "1")
+    monkeypatch.setenv("TELEGRAM_ROOTS_TIMEOUT_SECONDS", "0.05")
+
+    roots, status = await runtime._get_effective_allowed_roots_with_status(
+        _ctx_with_hanging_list_roots()
+    )
+    assert status == runtime.ROOTS_STATUS_SERVER_FALLBACK
+    assert roots == [root.resolve()]
+
+
+@pytest.mark.asyncio
+async def test_list_roots_timeout_denies_without_opt_in(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.delenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", raising=False)
+    monkeypatch.setenv("TELEGRAM_ROOTS_TIMEOUT_SECONDS", "0.05")
+
+    roots, status = await runtime._get_effective_allowed_roots_with_status(
+        _ctx_with_hanging_list_roots()
+    )
+    assert status == runtime.ROOTS_STATUS_TIMEOUT
+    assert roots == []
+
+    _roots, error = await runtime._ensure_allowed_roots(
+        _ctx_with_hanging_list_roots(), "download_media"
+    )
+    assert error is not None
+    assert "roots/list" in error

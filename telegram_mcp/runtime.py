@@ -196,6 +196,25 @@ class BearerTokenMiddleware:
 # We wrap the low-level request handler (after FastMCP registers it) to inject
 # annotations into the final CallToolResult, preserving structured output.
 _USER_AUDIENCE = Annotations(audience=["user"])
+TOOL_TIMEOUT_SECONDS_DEFAULT = 55.0
+
+
+def _tool_timeout_seconds(value: Optional[str] = None) -> Optional[float]:
+    """Return the server-side ceiling for one MCP tool call.
+
+    The default stays just above the two event-wait tools' 50-second defaults,
+    while ensuring a wedged Telethon request becomes an explicit MCP error
+    before common client-side one-minute timeouts. Set the value to ``0`` or a
+    negative number only for a deliberately unbounded operator session.
+    """
+    raw_value = os.getenv("TELEGRAM_TOOL_TIMEOUT_SECONDS") if value is None else value
+    if not raw_value:
+        return TOOL_TIMEOUT_SECONDS_DEFAULT
+    try:
+        timeout = float(raw_value)
+    except ValueError:
+        return TOOL_TIMEOUT_SECONDS_DEFAULT
+    return timeout if timeout > 0 else None
 
 
 def _install_annotation_hook() -> None:
@@ -204,7 +223,27 @@ def _install_annotation_hook() -> None:
     original_handler = mcp._mcp_server.request_handlers[CallToolRequest]
 
     async def annotated_handler(req):
-        response = await original_handler(req)
+        timeout = _tool_timeout_seconds()
+        if timeout is None:
+            response = await original_handler(req)
+        else:
+            try:
+                response = await asyncio.wait_for(original_handler(req), timeout=timeout)
+            except asyncio.TimeoutError:
+                response = ServerResult(
+                    CallToolResult(
+                        content=[
+                            TextContent(
+                                type="text",
+                                text=(
+                                    "Telegram MCP tool timed out after "
+                                    f"{timeout:g}s (code: GEN-TIMEOUT)."
+                                ),
+                            )
+                        ],
+                        isError=True,
+                    )
+                )
         if isinstance(response, ServerResult) and isinstance(response.root, CallToolResult):
             content = response.root.content
             if content:
@@ -790,14 +829,8 @@ ROOTS_STATUS_TRANSPORT_UNAVAILABLE = "transport_unavailable"
 # up front (see _client_roots_channel_unavailable), so this budget only ever
 # applies to a client that accepted the request and went quiet — 10s is generous
 # for a local round-trip while still failing inside a normal tool-call budget.
-# Env var name matches upstream PR #165
-# (https://github.com/chigwell/telegram-mcp/pull/165), which fixes the same
-# hang with a timeout alone; the default differs because the structural case
-# no longer reaches here.
-# Review trigger: PR #165 is still OPEN (checked 2026-08-21). If it merges,
-# diff its timeout logic against this file — its default is 1s, ours is 10s —
-# and decide whether the transport-detection guard above still earns its keep
-# on top of whatever lands upstream.
+# Keep the fork's original environment variable as the fallback for the
+# upstream TELEGRAM_ROOTS_TIMEOUT_SECONDS override.
 ROOTS_REQUEST_TIMEOUT_SECONDS = _parse_float_env(
     os.getenv("TELEGRAM_ROOTS_REQUEST_TIMEOUT_SECONDS"), 10.0
 )
@@ -805,6 +838,11 @@ ROOTS_REQUEST_TIMEOUT_SECONDS = _parse_float_env(
 # The transport can only become unusable once per process, so say it once
 # instead of on every file-path call.
 _roots_transport_reported = False
+
+# Some clients accept the server-initiated roots/list request but never answer
+# it (observed with Claude Code over streamable HTTP), which would otherwise
+# hang every file-path tool forever instead of failing.
+ROOTS_REQUEST_TIMEOUT_DEFAULT = 10.0
 
 
 # Error code prefix mapping for better error tracing
@@ -1943,6 +1981,22 @@ def _client_roots_channel_unavailable() -> Optional[str]:
     return None
 
 
+def _roots_request_timeout(value: Optional[str] = None) -> Optional[float]:
+    """Seconds to wait for the client's ``roots/list`` reply.
+
+    Override with ``TELEGRAM_ROOTS_TIMEOUT_SECONDS``; ``0`` or a negative value
+    waits forever (the pre-timeout behavior).
+    """
+    raw_value = os.getenv("TELEGRAM_ROOTS_TIMEOUT_SECONDS") if value is None else value
+    if raw_value is None or not str(raw_value).strip():
+        return ROOTS_REQUEST_TIMEOUT_SECONDS
+    try:
+        timeout = float(raw_value)
+    except (TypeError, ValueError):
+        return ROOTS_REQUEST_TIMEOUT_DEFAULT
+    return timeout if timeout > 0 else None
+
+
 async def _get_effective_allowed_roots_with_status(
     ctx: Optional[Context],
 ) -> tuple[List[Path], str]:
@@ -1968,21 +2022,24 @@ async def _get_effective_allowed_roots_with_status(
         return [], ROOTS_STATUS_TRANSPORT_UNAVAILABLE
 
     try:
-        list_roots_result = await asyncio.wait_for(
-            ctx.session.list_roots(), timeout=ROOTS_REQUEST_TIMEOUT_SECONDS
-        )
-    except (asyncio.TimeoutError, TimeoutError):
-        # Reached only when the transport looked capable but the client stayed
-        # silent. Requiring the explicit opt-in here matches the treatment of
-        # other unexpected failures: a silent client is not evidence that
-        # server-side roots were intended to apply.
+        timeout = _roots_request_timeout()
+        if timeout is None:
+            list_roots_result = await ctx.session.list_roots()
+        else:
+            list_roots_result = await asyncio.wait_for(ctx.session.list_roots(), timeout)
+    except asyncio.TimeoutError:
         if fallback_roots and _server_roots_fallback_enabled():
             logger.warning(
-                "MCP roots request timed out; falling back to server "
-                "CLI roots (TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK)."
+                "MCP client did not answer roots/list before the configured timeout "
+                "(TELEGRAM_ROOTS_TIMEOUT_SECONDS); falling back to server CLI roots "
+                "(TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK)."
             )
             return fallback_roots, ROOTS_STATUS_SERVER_FALLBACK
-        logger.error("MCP roots request timed out; disabling file-path tools for safety.")
+        logger.error(
+            "MCP client did not answer roots/list before the configured timeout "
+            "(TELEGRAM_ROOTS_TIMEOUT_SECONDS); disabling file-path tools instead "
+            "of hanging."
+        )
         return [], ROOTS_STATUS_TIMEOUT
     except Exception as error:
         recovered_roots = _coerce_paths_from_list_roots_validation_error(error)
@@ -2062,9 +2119,9 @@ async def _ensure_allowed_roots(
                 [],
                 (
                     f"{tool_name} is disabled because the MCP client did not answer the "
-                    f"Roots request within {ROOTS_REQUEST_TIMEOUT_SECONDS}s. Pass server "
-                    "CLI roots and set TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1, or use a "
-                    "transport whose client can answer Roots requests."
+                    "roots/list request. Configure server CLI roots and set "
+                    "TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1, or raise "
+                    "TELEGRAM_ROOTS_TIMEOUT_SECONDS."
                 ),
             )
         return (
@@ -2214,6 +2271,7 @@ _DANGEROUS_TOOLS: frozenset[str] = frozenset(
         "delete_profile_photo",
         "delete_chat_photo",
         "ban_user",
+        "remove_user",
         "promote_admin",
         "demote_admin",
         "edit_admin_rights",

@@ -44,8 +44,8 @@ Message sent successfully:
 The server currently includes 80+ MCP tools grouped into these areas:
 
 - **Accounts:** list configured accounts and route tool calls by account label.
-- **Chats and groups:** list chats, inspect metadata, create groups/channels, join or leave chats, invite users, manage admins, bans, default permissions, slow mode, topics, invite links, common chats, read receipts, and message links.
-- **Messages:** send, schedule, edit, delete, forward, pin, unpin, mark read, reply, search, inspect context, create polls, manage reactions, inspect inline buttons, and press inline callbacks. `send_message`, `reply_to_message`, and `edit_message` support classic formatting (`parse_mode='md'`/`'html'`) and server-side rich formatting (`parse_mode='rich'`/`'rich_markdown'`/`'rich_html'` — full Markdown/HTML with tables, headings, formulas, and collapsible sections). Rich modes require Telegram Premium on the account; Premium is re-checked on every call, and without it nothing is sent — the tool returns a structured `telegram_premium_required` result so the agent can reformat with classic modes and retry.
+- **Chats and groups:** list chats, inspect metadata, create groups/channels, join or leave chats, invite or remove users, manage admins, bans, default permissions, slow mode, topics, invite links, common chats, read receipts, and message links.
+- **Messages:** send, schedule, edit, delete, forward, pin, unpin, mark read, reply, search, inspect context, create polls, manage reactions, inspect inline buttons, and press inline callbacks. `send_message`, `reply_to_message`, and `edit_message` support classic formatting (`parse_mode='md'`/`'html'`) and server-side rich formatting (`parse_mode='rich'`/`'rich_markdown'`/`'rich_html'` — full Markdown/HTML with tables, headings, formulas, and collapsible sections). Rich modes require Telegram Premium on the account; Premium is re-checked on every call, and without it nothing is sent — the tool returns a structured `telegram_premium_required` result so the agent can reformat with classic modes and retry. `send_message`, `reply_to_message`, and `edit_message` also accept `format_date` to render a date as a tappable chip.
 - **Contacts:** list, search, add, delete, block, unblock, import, export, inspect direct chats, find recent contact interactions, and remember contacts by the names you actually use (see below).
 
 ### Remembered contacts
@@ -80,6 +80,42 @@ The cache lives in `TELEGRAM_TRANSCRIPT_CACHE_DIR` (default `data/transcripts`),
 - **Events:** wait for incoming messages with debounce (`wait_for_new_message`, `wait_for_settled_message`), optionally for one chat only via `chat_id` — without it any unrelated conversation wakes the wait — or enable the opt-in incoming event feed for callback-style delivery (see below).
 
 All tool results that include Telegram user-controlled content are sanitized and, where practical, returned as structured JSON.
+
+### Reusing custom emoji
+
+`get_history`, `list_messages`, `search_messages`, `search_global`,
+`get_message_context` (including `replied_message`), `get_pinned_messages`, and
+`get_drafts` include `custom_emojis` when the message contains custom emoji.
+`get_messages` and `get_scheduled_messages` include the same metadata as a JSON
+list in their text output. Ordinary messages keep their existing output.
+
+```json
+{"text": "🍷 News", "custom_emojis": [{"emoji": "🍷", "id": "5368324170671202286"}]}
+```
+
+Each entry contains the fallback emoji and its Telegram document ID as a string.
+Repeated IDs appear once per message; different IDs remain separate even when
+their fallback emoji looks identical. This is a list of reusable emoji variants,
+not a map of their positions or a copy of all message formatting. Extraction uses
+the original Telegram entities, including `TextCustomEmoji` nodes in block-format
+`rich_message` content, and makes no additional API requests. Emoji
+joiners and flag tag characters are preserved in the fallback text.
+
+To reuse an entry, set `parse_mode="html"` in `send_message`, `reply_to_message`,
+or `edit_message`, and insert `<tg-emoji emoji-id="ID">EMOJI</tg-emoji>` using its
+`id` and `emoji`. HTML-escape the fallback and other literal text. For example,
+the entry above becomes `<tg-emoji emoji-id="5368324170671202286">🍷</tg-emoji>`.
+Telegram's account restrictions still apply to sending custom emoji.
+
+### Tappable dates and times
+
+Passing `format_date` to `send_message`, `reply_to_message`, or `edit_message`
+renders a tappable date/time chip — the same entity Telegram's apps attach when
+you type a recognizable date. Give the date text exactly as it appears in the
+message: `'13/09'`, `'13/09/2026'`, or `'13/09 17:00'`. The chip opens
+copy-date / add-to-calendar / reminder actions. Plain-text messages only —
+omit `parse_mode`. For example, `send_message(chat_id, "Lunch 13/09 13:00",
+format_date="13/09 13:00")` sends a message whose date opens that menu.
 
 ### Incoming Event Feed (callback mode, Claude Code only)
 
@@ -307,6 +343,11 @@ Prefer `http` when more than one MCP client (or many coding-agent sessions)
 will use the server: a single long-lived process holds one Telegram
 connection, instead of every client spawning its own Telethon session —
 Telegram throttles and may flag accounts that open many parallel sessions.
+
+Every tool call also has a server-side ceiling of 55 seconds, configured with
+`TELEGRAM_TOOL_TIMEOUT_SECONDS`. A timed-out Telegram request returns an explicit
+MCP error instead of leaving the client waiting indefinitely. Set the value to
+`0` only for a deliberately unbounded operator session.
 
 Register the shared server with clients:
 
