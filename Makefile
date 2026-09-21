@@ -6,6 +6,7 @@ PROJECT_ROOT := $(CURDIR)
 START_SCRIPT := $(PROJECT_ROOT)/scripts/start.sh
 HEADERS_HELPER := $(PROJECT_ROOT)/scripts/mcp-auth-headers.sh
 HEALTH_SCRIPT := $(PROJECT_ROOT)/scripts/health-check.sh
+SETUP_SCRIPT := $(PROJECT_ROOT)/scripts/setup.sh
 ENV_FILE := $(PROJECT_ROOT)/.env
 
 # Same precedence as scripts/mcp-endpoint.sh: a command-line or environment
@@ -25,7 +26,7 @@ CODEX ?= codex
 CODEX_BEARER_ENV ?= TELEGRAM_MCP_TOKEN
 UV ?= uv
 
-.PHONY: list help restart start start-http start-sse start-stdio health config-check config-check-claude config-check-codex use-http use-http-claude use-http-codex use-sse use-sse-claude use-stdio use-stdio-claude use-stdio-codex sync-upstream-readme
+.PHONY: list help setup restart start start-http start-sse start-stdio health config-check config-check-claude config-check-codex use-http use-http-claude use-http-codex use-sse use-sse-claude use-stdio use-stdio-claude use-stdio-codex sync-upstream-readme
 
 list:
 	@echo "Available commands:"
@@ -34,6 +35,9 @@ list:
 	@echo ""
 
 help: list ## Same as list; show available commands
+
+setup: ## One-shot install: credentials, Keychain, launchd HTTP server, MCP clients
+	bash "$(SETUP_SCRIPT)"
 
 start: start-http ## Run HTTP mode in foreground
 

@@ -31,7 +31,7 @@ cd telegram-mcp
 
 <!-- -->
 
-> **預設安裝方式：** clone 完成後可直接執行 `bash scripts/setup.sh`。script 會安裝缺少的 uv、引導你完成 Telegram 憑證與 session string、建立專用檔案交換目錄 `~/Downloads/telegram_mcp_files`、安裝 launchd 常駐 Streamable HTTP server，並把 Claude Code 與 Codex MCP 設定指向 `http://127.0.0.1:8765/mcp`。
+> **預設安裝方式：** clone 完成後可直接執行 `make setup`（等同 `bash scripts/setup.sh`）。script 會安裝缺少的 uv、引導你完成 Telegram 憑證與 session string、建立專用檔案交換目錄 `~/Downloads/telegram_mcp_files`、安裝 launchd 常駐 Streamable HTTP server，並把 Claude Code 與 Codex MCP 設定指向 `http://127.0.0.1:8765/mcp`。
 >
 > **常用指令：** 可執行 `make list` 查看所有 Makefile 指令。HTTP 模式用 `make start` 或 `make start-http` 前景啟動 server，再用 `make use-http` 將 Claude Code 與 Codex MCP 設定切到 `http://127.0.0.1:8765/mcp`。
 
@@ -90,10 +90,10 @@ uv run telegram-mcp-generate-session
 若要使用預設一鍵安裝，可從這裡直接執行：
 
 ```bash
-bash scripts/setup.sh
+make setup
 ```
 
-這會自動完成 Keychain 寫入、建立 `~/Downloads/telegram_mcp_files` 作為專用 allowed root、安裝 launchd Streamable HTTP 常駐服務，以及 Claude Code／Codex MCP 設定。以下手動設定只在不使用 `setup.sh` 時需要。
+這會自動完成 Keychain 寫入、建立 `~/Downloads/telegram_mcp_files` 作為專用 allowed root、安裝 launchd Streamable HTTP 常駐服務，以及 Claude Code／Codex MCP 設定。以下手動設定只在不使用 `make setup` 時需要。
 
 如果你已經把 Telegram 憑證存入 macOS Keychain，並且下列三個 item 都存在，HTTP / SSE / stdio 的 Makefile 啟動指令會自動讀取它們，不需要在 `.env` 填寫 Telegram 憑證：
 
@@ -184,7 +184,7 @@ http://127.0.0.1:8765/mcp
 
 `send_file`、`download_media`、`upload_file` 與 `open_photo(save_path=...)` 會讀寫本機檔案。Stateless Streamable HTTP 無法向 MCP client 取得 Roots，因此 launchd 必須在啟動 server 時明確傳入 server-side roots；沒有 roots 時，這些工具會預設停用。
 
-`scripts/setup.sh` 會建立並授權專用目錄：
+`make setup` 會建立並授權專用目錄：
 
 ```text
 ~/Downloads/telegram_mcp_files
@@ -195,10 +195,10 @@ http://127.0.0.1:8765/mcp
 `setup.sh` 也會偵測內嵌 telegram-mcp 的專案，或設定 `TELEGRAM_MCP_SUMMARY_PROJECT` 指向的專案根目錄；找到 `.claude/commands/telegram-summary.md` 時，自動建立並只授權該專案的 `docs/chat/`。因此 `$telegram-summary` 可以把照片保存到預期的 `<對話資料夾>/media/`，而不會取得整個 repository 的權限：
 
 ```bash
-TELEGRAM_MCP_SUMMARY_PROJECT="/absolute/path/to/project" bash scripts/setup.sh
+TELEGRAM_MCP_SUMMARY_PROJECT="/absolute/path/to/project" make setup
 ```
 
-> `TELEGRAM_MCP_SUMMARY_PROJECT` **只有 `scripts/setup.sh` 會讀，而且必須在命令列上傳入**。`setup.sh` 不會載入 `.env`，寫進 `.env` 不會有任何作用；server 端也不使用這個變數。指定的路徑若不存在或沒有 `.claude/commands/telegram-summary.md`，setup.sh 會靜默跳過、不影響其他安裝步驟。
+> `TELEGRAM_MCP_SUMMARY_PROJECT` **只有 `scripts/setup.sh`（`make setup`）會讀，而且必須在命令列上傳入**。`setup.sh` 不會載入 `.env`，寫進 `.env` 不會有任何作用；server 端也不使用這個變數。指定的路徑若不存在或沒有 `.claude/commands/telegram-summary.md`，setup.sh 會靜默跳過、不影響其他安裝步驟。
 
 若未設定，或專案位於其他位置，也可以手動只授權該專案的 `docs/chat/`：
 
@@ -227,7 +227,7 @@ TELEGRAM_MCP_ALLOWED_ROOTS="" bash scripts/install-launchd.sh
 
 ## 步驟五：切換 MCP client 設定
 
-若你是執行 `bash scripts/setup.sh` 或 `bash scripts/install-launchd.sh`，script 會分別偵測 Claude Code 與 Codex，並把已安裝的 client 設為 Streamable HTTP。未安裝的 client 會被跳過，並顯示安裝後應執行的註冊命令；此步驟可用 `make config-check` 確認。
+若你是執行 `make setup` 或 `bash scripts/install-launchd.sh`，script 會分別偵測 Claude Code 與 Codex，並把已安裝的 client 設為 Streamable HTTP。未安裝的 client 會被跳過，並顯示安裝後應執行的註冊命令；此步驟可用 `make config-check` 確認。
 
 使用 Makefile 指令管理 MCP registration：
 
@@ -271,6 +271,7 @@ codex mcp add telegram-mcp -- "/path/to/telegram-mcp/scripts/start.sh" --transpo
 
 ```bash
 make list          # 顯示所有指令
+make setup         # 一鍵安裝（憑證、Keychain、launchd、MCP client）
 make start         # 前景啟動 HTTP mode，同 make start-http
 make start-http    # 前景啟動 Streamable HTTP mode
 make start-sse     # 前景啟動 legacy SSE mode
