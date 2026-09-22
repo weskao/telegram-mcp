@@ -23,10 +23,12 @@ HTTP_URL ?= http://$(MCP_HOST):$(MCP_PORT)/mcp
 SSE_URL ?= http://$(MCP_HOST):$(MCP_PORT)/sse
 CLAUDE ?= claude
 CODEX ?= codex
+GROK ?= grok
 CODEX_BEARER_ENV ?= TELEGRAM_MCP_TOKEN
+GROK_BEARER_ENV ?= TELEGRAM_MCP_TOKEN
 UV ?= uv
 
-.PHONY: list help setup restart start start-http start-sse start-stdio health config-check config-check-claude config-check-codex use-http use-http-claude use-http-codex use-sse use-sse-claude use-stdio use-stdio-claude use-stdio-codex sync-upstream-readme
+.PHONY: list help setup restart start start-http start-sse start-stdio health config-check config-check-claude config-check-codex config-check-grok use-http use-http-claude use-http-codex use-http-grok use-sse use-sse-claude use-stdio use-stdio-claude use-stdio-codex use-stdio-grok sync-upstream-readme
 
 list:
 	@echo "Available commands:"
@@ -63,10 +65,10 @@ restart: ## Restart the launchd service, wait for MCP_PORT, then run health
 	done
 	@$(MAKE) --no-print-directory health
 
-health: ## Check telegram-mcp health across launchd, HTTP server, and Claude/Codex registration
-	@MCP_HOST=$(MCP_HOST) MCP_PORT=$(MCP_PORT) MCP_NAME=$(MCP_NAME) CLAUDE=$(CLAUDE) CODEX=$(CODEX) "$(HEALTH_SCRIPT)"
+health: ## Check telegram-mcp health across launchd, HTTP server, and Claude/Codex/Grok registration
+	@MCP_HOST=$(MCP_HOST) MCP_PORT=$(MCP_PORT) MCP_NAME=$(MCP_NAME) CLAUDE=$(CLAUDE) CODEX=$(CODEX) GROK=$(GROK) "$(HEALTH_SCRIPT)"
 
-config-check: config-check-claude config-check-codex ## Show current Claude and Codex MCP config for telegram
+config-check: config-check-claude config-check-codex config-check-grok ## Show current Claude, Codex, and Grok MCP config for telegram
 
 config-check-claude: ## Show current Claude user-scope MCP config
 	@if command -v "$(CLAUDE)" >/dev/null 2>&1; then $(CLAUDE) mcp get $(MCP_NAME) || echo "($(MCP_NAME) not yet registered with Claude)"; else echo "Claude CLI not found — Claude is not configured. After installing it, run 'make use-http-claude'."; fi
@@ -74,7 +76,10 @@ config-check-claude: ## Show current Claude user-scope MCP config
 config-check-codex: ## Show current Codex MCP config
 	@if command -v "$(CODEX)" >/dev/null 2>&1; then $(CODEX) mcp get $(MCP_NAME) || echo "($(MCP_NAME) not yet registered with Codex)"; else echo "Codex CLI not found — Codex is not configured. After installing it, run 'make use-http-codex'."; fi
 
-use-http: use-http-claude use-http-codex ## Switch Claude and Codex MCP config to Streamable HTTP
+config-check-grok: ## Show current Grok MCP config
+	@if command -v "$(GROK)" >/dev/null 2>&1; then $(GROK) mcp list | grep -F $(MCP_NAME) || echo "($(MCP_NAME) not yet registered with Grok)"; else echo "Grok CLI not found — Grok is not configured. After installing it, run 'make use-http-grok'."; fi
+
+use-http: use-http-claude use-http-codex use-http-grok ## Switch Claude, Codex, and Grok MCP config to Streamable HTTP
 	@echo "Finished configuring installed MCP clients for Streamable HTTP. Missing CLIs were skipped."
 
 use-http-claude: ## Switch Claude MCP config to authenticated Streamable HTTP
@@ -97,8 +102,18 @@ use-http-codex: ## Switch Codex MCP config to authenticated Streamable HTTP
 	echo ""; \
 	echo "Registered '$(MCP_NAME)' for Codex. Restart Codex after the launchd service is running."
 
-use-sse: use-sse-claude ## Switch Claude MCP config to legacy SSE (Codex does not support SSE)
-	@echo "Codex supports Streamable HTTP and stdio, not legacy SSE; its configuration was not changed."
+use-http-grok: ## Switch Grok MCP config to authenticated Streamable HTTP
+	@if ! command -v "$(GROK)" >/dev/null 2>&1; then echo "Grok CLI not found — skipping Grok registration."; echo "After installing Grok, run 'make use-http-grok'."; exit 0; fi; \
+	set -e; \
+	echo "Removing existing '$(MCP_NAME)' Grok MCP registration (if any)..."; \
+	$(GROK) mcp remove --scope user $(MCP_NAME) >/dev/null 2>&1 || true; \
+	echo "Registering '$(MCP_NAME)' via Streamable HTTP at $(HTTP_URL) ..."; \
+	$(GROK) mcp add --scope user --transport http $(MCP_NAME) "$(HTTP_URL)" --header 'Authorization: Bearer $${$(GROK_BEARER_ENV)}'; \
+	echo ""; \
+	echo "Registered '$(MCP_NAME)' for Grok. Restart Grok to apply the change."
+
+use-sse: use-sse-claude ## Switch Claude MCP config to legacy SSE (Codex/Grok keep their current transport)
+	@echo "Codex and Grok were left unchanged; this target only switches Claude to legacy SSE."
 
 use-sse-claude: ## Switch Claude MCP config to authenticated legacy SSE
 	@if ! command -v "$(CLAUDE)" >/dev/null 2>&1; then echo "Claude CLI not found — skipping Claude registration."; echo "After installing Claude Code, run 'make use-sse-claude'."; exit 0; fi; \
@@ -110,7 +125,7 @@ use-sse-claude: ## Switch Claude MCP config to authenticated legacy SSE
 	echo ""; \
 	echo "Registered '$(MCP_NAME)' as legacy SSE for Claude. Restart Claude Code to apply the change."
 
-use-stdio: use-stdio-claude use-stdio-codex ## Switch Claude and Codex MCP config to stdio
+use-stdio: use-stdio-claude use-stdio-codex use-stdio-grok ## Switch Claude, Codex, and Grok MCP config to stdio
 	@echo "Finished configuring installed MCP clients for stdio. Missing CLIs were skipped."
 
 use-stdio-claude: ## Switch Claude MCP config back to stdio
@@ -132,6 +147,16 @@ use-stdio-codex: ## Switch Codex MCP config back to stdio
 	$(CODEX) mcp add $(MCP_NAME) -- "$(START_SCRIPT)" --transport stdio; \
 	echo ""; \
 	echo "Registered '$(MCP_NAME)' as stdio. Restart Codex to apply the change."
+
+use-stdio-grok: ## Switch Grok MCP config back to stdio
+	@if ! command -v "$(GROK)" >/dev/null 2>&1; then echo "Grok CLI not found — skipping Grok registration."; echo "After installing Grok, run 'make use-stdio-grok'."; exit 0; fi; \
+	set -e; \
+	echo "Removing existing '$(MCP_NAME)' Grok MCP registration (if any)..."; \
+	$(GROK) mcp remove --scope user $(MCP_NAME) >/dev/null 2>&1 || true; \
+	echo "Registering '$(MCP_NAME)' via stdio from $(PROJECT_ROOT) ..."; \
+	$(GROK) mcp add --scope user $(MCP_NAME) -- "$(START_SCRIPT)" --transport stdio; \
+	echo ""; \
+	echo "Registered '$(MCP_NAME)' as stdio for Grok. Restart Grok to apply the change."
 
 sync-upstream-readme: ## Refresh README.upstream.md from upstream/main (never edit it by hand)
 	@git remote get-url upstream >/dev/null 2>&1 || { echo "No 'upstream' remote. Add it: git remote add upstream https://github.com/chigwell/telegram-mcp.git"; exit 1; }

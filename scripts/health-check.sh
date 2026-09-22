@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot health check for the telegram-mcp server across all four layers:
+# One-shot health check for the telegram-mcp server across all five layers:
 #   1. launchd  — is the background service loaded *and running*?
 #   2. server   — is the HTTP port listening? (401 is healthy: auth is enforced)
 #   3. claude   — is Claude's MCP registration actually connecting?
@@ -8,6 +8,10 @@
 #                 connection probe (a dead URL still lists as "enabled"), so we run one
 #                 ourselves: resolve the token from the env var Codex reads, then POST
 #                 `initialize`. 200 = token accepted, 401 = Codex would be rejected.
+#   5. grok     — is Grok's MCP registration actually connecting? `grok mcp doctor`
+#                 handshakes. Grok expands `${TELEGRAM_MCP_TOKEN}` in the registered
+#                 Authorization header, so this probe publishes that env var the same
+#                 way a Grok session started after `make use-http-grok` would.
 #
 # Read-only: never changes config. Exits 0 when every layer is healthy,
 # 1 otherwise, so it can gate other commands (`make health && ...`).
@@ -28,6 +32,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mcp-endpoint.sh"
 MCP_NAME="${MCP_NAME:-telegram-mcp}"
 CLAUDE="${CLAUDE:-claude}"
 CODEX="${CODEX:-codex}"
+GROK="${GROK:-grok}"
 LAUNCHD_LABEL="com.telegram-mcp.server"
 LOG_ERR="$HOME/Library/Logs/telegram-mcp/server.err.log"
 
@@ -118,6 +123,31 @@ else
         *)   bad "handshake returned HTTP $codex_code";;
       esac
     fi
+  fi
+fi
+
+# 5. grok — registration plus a real handshake via `grok mcp doctor`. A missing
+#    CLI is not a failure (Claude/Codex-only setups). Grok stores
+#    `Authorization: Bearer ${TELEGRAM_MCP_TOKEN}` and expands it at load time,
+#    so the token is never written to ~/.grok/config.toml. Publish the same
+#    lookup Codex uses (process env, then launchctl) before probing.
+echo "grok   :"
+if ! command -v "$GROK" >/dev/null 2>&1; then
+  skip "grok CLI not found"
+else
+  grok_token="${TELEGRAM_MCP_TOKEN:-}"
+  [[ -z "$grok_token" ]] && grok_token="$(launchctl getenv TELEGRAM_MCP_TOKEN 2>/dev/null)"
+  grok_out="$(TELEGRAM_MCP_TOKEN="$grok_token" "$GROK" mcp doctor "$MCP_NAME" --json 2>/dev/null)" || true
+  if [[ "$grok_out" == *"not found"* ]]; then
+    bad "$MCP_NAME not registered — run 'make use-http-grok'"
+  elif [[ "$grok_out" == *'"healthy": true'* ]]; then
+    ok "connected (Grok's own registration)"
+  elif [[ "$grok_out" == *"401"* ]]; then
+    bad "NOT connected — HTTP 401. Run 'make use-http-grok' so Grok sends \$TELEGRAM_MCP_TOKEN"
+  elif [[ -z "$grok_out" ]]; then
+    bad "$MCP_NAME not registered — run 'make use-http-grok'"
+  else
+    bad "NOT connected — run 'make use-http-grok'"
   fi
 fi
 

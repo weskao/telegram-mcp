@@ -138,10 +138,10 @@ if [[ -z "$TOKEN" ]]; then
   echo "[telegram-mcp] Generated and stored HTTP bearer token in Keychain"
 fi
 
-# Codex's Streamable HTTP configuration reads the bearer token from its process
-# environment. Publish the Keychain-backed value to the GUI launchd domain so
-# Codex instances started after this installer inherit it; the token is never
-# written to Codex configuration.
+# Codex and Grok Streamable HTTP configuration reads the bearer token from the
+# process environment. Publish the Keychain-backed value to the GUI launchd
+# domain so instances started after this installer inherit it; the token is
+# never written to client configuration.
 launchctl setenv TELEGRAM_MCP_TOKEN "$TOKEN"
 launchctl setenv TELEGRAM_MCP_HTTP_VALUE "$TOKEN"
 
