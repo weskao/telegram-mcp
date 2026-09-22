@@ -27,7 +27,9 @@
 set -uo pipefail
 
 # MCP_HOST / MCP_PORT / MCP_URL from env, then .env, then defaults.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mcp-endpoint.sh"
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_script_dir/mcp-endpoint.sh"
+source "$_script_dir/mcp-client.sh"
 
 MCP_NAME="${MCP_NAME:-telegram-mcp}"
 CLAUDE="${CLAUDE:-claude}"
@@ -105,8 +107,7 @@ else
     # Both lookups are paths Codex itself uses: launcher.sh publishes the token via
     # `launchctl setenv` (what a GUI-launched Codex inherits), and a Codex started from
     # a shell inherits that shell's exported value instead.
-    codex_token="${!codex_var:-}"
-    [[ -z "$codex_token" ]] && codex_token="$(launchctl getenv "$codex_var" 2>/dev/null)"
+    codex_token="$(resolve_token "$codex_var")"
     if [[ -z "$codex_token" ]]; then
       bad "enabled ($codex_transport) but \$$codex_var is unset — restart the service"
     else
@@ -135,8 +136,7 @@ echo "grok   :"
 if ! command -v "$GROK" >/dev/null 2>&1; then
   skip "grok CLI not found"
 else
-  grok_token="${TELEGRAM_MCP_TOKEN:-}"
-  [[ -z "$grok_token" ]] && grok_token="$(launchctl getenv TELEGRAM_MCP_TOKEN 2>/dev/null)"
+  grok_token="$(resolve_token TELEGRAM_MCP_TOKEN)"
   grok_out="$(TELEGRAM_MCP_TOKEN="$grok_token" "$GROK" mcp doctor "$MCP_NAME" --json 2>/dev/null)" || true
   if [[ "$grok_out" == *"not found"* ]]; then
     bad "$MCP_NAME not registered — run 'make use-http-grok'"
