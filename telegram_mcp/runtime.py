@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+import re
 import sys
 import json
 import time
@@ -13,7 +14,7 @@ from contextlib import contextmanager
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import List, Dict, Optional, Union, Any, get_args
+from typing import List, Dict, Optional, Union, Any, Iterable, get_args
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -24,7 +25,7 @@ from mcp.types import Annotations, ImageContent, TextContent, ToolAnnotations
 from mcp.shared.exceptions import McpError
 from pythonjsonlogger import jsonlogger
 from telethon import TelegramClient, functions, types, utils
-from telethon.errors import AuthKeyDuplicatedError, FloodWaitError
+from telethon.errors import AuthKeyDuplicatedError, FloodWaitError, BotMethodInvalidError
 from telethon.sessions import StringSession
 from telethon.tl.types import (
     User,
@@ -334,6 +335,114 @@ def _apply_exposed_tools_mode(server: FastMCP = mcp, mode: Optional[str] = None)
             server._tool_manager.remove_tool(tool.name)
             removed.append(tool.name)
     return removed
+
+
+_FILE_EXTENSION_TOKEN_PATTERN = re.compile(r"^\.[A-Za-z0-9_-]+$")
+_FILE_EXTENSIONS_ENTRY_SEPARATOR = ";"
+_FILE_EXTENSIONS_TOOL_SEPARATOR = ":"
+_FILE_EXTENSIONS_LIST_SEPARATOR = ","
+
+
+def _get_file_extension_overrides(value: Optional[str] = None) -> dict[str, set[str]]:
+    """Parse ``TELEGRAM_FILE_EXTENSIONS`` into a tool -> extension-set mapping.
+
+    ``TELEGRAM_FILE_EXTENSIONS=send_file:.pdf,.png;upload_file:.pdf`` mirrors
+    the ``TELEGRAM_EXPOSED_TOOLS`` convention: unset (or blank) means no
+    overrides at all, which keeps today's behaviour unchanged. A malformed
+    entry fails loudly here, at parse time, the same way a malformed
+    ``TELEGRAM_EXPOSED_TOOLS`` mode fails loudly in
+    ``_get_exposed_tools_mode`` -- a typo must not silently produce a
+    narrower (or wider) allowlist that looks like it worked.
+
+    This only parses the tool -> extensions shape; it does not know the set
+    of real tool names, so it cannot reject an unknown tool. That check
+    happens in ``_apply_file_extension_overrides``, which has a server to
+    check against.
+    """
+    raw_value = os.getenv("TELEGRAM_FILE_EXTENSIONS", "") if value is None else value
+    raw_value = raw_value.strip()
+    if not raw_value:
+        return {}
+
+    overrides: dict[str, set[str]] = {}
+    for entry in raw_value.split(_FILE_EXTENSIONS_ENTRY_SEPARATOR):
+        entry = entry.strip()
+        if not entry:
+            continue
+        tool_name, separator, raw_extensions = entry.partition(_FILE_EXTENSIONS_TOOL_SEPARATOR)
+        tool_name = tool_name.strip().lower()
+        if not separator or not tool_name:
+            raise SystemExit(
+                f"Invalid TELEGRAM_FILE_EXTENSIONS '{raw_value}'. Each entry must look "
+                f"like 'tool{_FILE_EXTENSIONS_TOOL_SEPARATOR}.ext{_FILE_EXTENSIONS_LIST_SEPARATOR}.ext', "
+                f"entries separated by '{_FILE_EXTENSIONS_ENTRY_SEPARATOR}'."
+            )
+
+        extensions: set[str] = set()
+        for raw_extension in raw_extensions.split(_FILE_EXTENSIONS_LIST_SEPARATOR):
+            token = raw_extension.strip().lower()
+            if not token:
+                raise SystemExit(
+                    f"Invalid TELEGRAM_FILE_EXTENSIONS '{raw_value}'. Tool '{tool_name}' "
+                    "has an empty extension entry."
+                )
+            if not token.startswith("."):
+                token = f".{token}"
+            if not _FILE_EXTENSION_TOKEN_PATTERN.match(token):
+                raise SystemExit(
+                    f"Invalid TELEGRAM_FILE_EXTENSIONS '{raw_value}'. Malformed extension "
+                    f"'{raw_extension.strip()}' for tool '{tool_name}'."
+                )
+            extensions.add(token)
+
+        # extensions is never empty here: an empty raw_extensions still yields
+        # one blank token from split(","), which is caught above.
+        if tool_name in overrides:
+            # Fail loudly rather than last-wins: silently dropping the first
+            # list would hand the operator a narrower or wider allowlist than
+            # the one they wrote, with no way to notice.
+            raise SystemExit(
+                f"Invalid TELEGRAM_FILE_EXTENSIONS '{raw_value}'. Tool "
+                f"'{tool_name}' is named more than once."
+            )
+        overrides[tool_name] = extensions
+    return overrides
+
+
+def _apply_file_extension_overrides(
+    server: FastMCP = mcp, value: Optional[str] = None
+) -> dict[str, set[str]]:
+    """Rebuild ``EXTENSION_ALLOWLISTS`` from defaults plus ``TELEGRAM_FILE_EXTENSIONS``.
+
+    Overrides merge over ``_DEFAULT_EXTENSION_ALLOWLISTS``: naming a tool
+    that already has a hardcoded default replaces that tool's whole set
+    (not a union), and any tool not mentioned keeps its default (including
+    ``send_file``/``upload_file``, which have no default and so stay
+    unrestricted when unset). This is the only thing that changes --
+    ``_ensure_extension_allowed`` itself is untouched and keeps reading the
+    module-level ``EXTENSION_ALLOWLISTS`` dict.
+
+    An unknown tool name aborts startup exactly like an unknown name in a
+    ``TELEGRAM_EXPOSED_TOOLS`` allowlist: validated against the server's own
+    registered tools, not a hardcoded guess at what tools exist. That check
+    reads the tool manager, so this must run *before*
+    ``_apply_exposed_tools_mode`` prunes it -- otherwise narrowing the
+    extensions of a tool that exposure hid would abort startup on a valid
+    configuration.
+    """
+    global EXTENSION_ALLOWLISTS
+    overrides = _get_file_extension_overrides(value)
+    if overrides:
+        registered = {tool.name for tool in server._tool_manager.list_tools()}
+        unknown = sorted(set(overrides) - registered)
+        if unknown:
+            # Fail loudly: a typo must not silently degrade into an allowlist
+            # that looks like it worked.
+            raise SystemExit(
+                f"Invalid TELEGRAM_FILE_EXTENSIONS: unknown tool(s) {', '.join(unknown)}."
+            )
+    EXTENSION_ALLOWLISTS = {**_DEFAULT_EXTENSION_ALLOWLISTS, **overrides}
+    return EXTENSION_ALLOWLISTS
 
 
 # ---------------------------------------------------------------------------
@@ -798,12 +907,18 @@ except Exception:
 SERVER_ALLOWED_ROOTS: list[Path] = []
 DEFAULT_DOWNLOAD_SUBDIR = "downloads"
 DISALLOWED_PATH_PATTERNS = ("*", "?", "[", "]", "{", "}", "~", "\x00")
-EXTENSION_ALLOWLISTS: dict[str, set[str]] = {
+_DEFAULT_EXTENSION_ALLOWLISTS: dict[str, set[str]] = {
     "send_voice": {".ogg", ".opus"},
     "send_sticker": {".webp"},
     "set_profile_photo": {".jpg", ".jpeg", ".png", ".webp"},
     "edit_chat_photo": {".jpg", ".jpeg", ".png", ".webp"},
 }
+# Mutable, TELEGRAM_FILE_EXTENSIONS-aware allowlist actually consulted by
+# _ensure_extension_allowed(). Rebuilt from _DEFAULT_EXTENSION_ALLOWLISTS by
+# _apply_file_extension_overrides() at startup; defaults to the hardcoded
+# values so importing this module without calling that function (e.g. tests)
+# keeps today's behaviour.
+EXTENSION_ALLOWLISTS: dict[str, set[str]] = dict(_DEFAULT_EXTENSION_ALLOWLISTS)
 MAX_FILE_BYTES: dict[str, int] = {
     "download_media": 200 * 1024 * 1024,  # 200 MB
     "send_file": 200 * 1024 * 1024,  # 200 MB
@@ -845,6 +960,137 @@ _roots_transport_reported = False
 ROOTS_REQUEST_TIMEOUT_DEFAULT = 10.0
 
 
+# Per-chat access control allowlist configuration (TELEGRAM_ALLOWED_CHAT_IDS)
+ALLOWED_CHAT_IDS: Optional[set[Union[int, str]]] = None
+CHAT_PARAM_NAMES: frozenset[str] = frozenset({"chat_id", "from_chat_id", "to_chat_id", "channel"})
+
+
+def _parse_allowed_chat_ids(
+    raw: Optional[Union[str, Iterable[Union[int, str]]]],
+) -> Optional[set[Union[int, str]]]:
+    """Parse TELEGRAM_ALLOWED_CHAT_IDS into a set of allowed IDs and usernames.
+
+    Supports comma-separated integer IDs (e.g. '12345678,-100123456789') and
+    usernames/handles (e.g. '@mychat,other_channel').
+    Also automatically indexes marked variants for bare integers and vice versa
+    so that both marked IDs (-100...) and bare positive IDs match.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return None
+        tokens = [t.strip() for t in raw.split(",") if t.strip()]
+    elif isinstance(raw, (list, tuple, set)):
+        tokens = [str(t).strip() for t in raw if str(t).strip()]
+    else:
+        return None
+
+    if not tokens:
+        return None
+
+    allowed: set[Union[int, str]] = set()
+    for token in tokens:
+        try:
+            val = int(token)
+            allowed.add(val)
+            # If negative supergroup: -100XXXXXXXXXX
+            if str(val).startswith("-100") and len(str(val)) > 4:
+                try:
+                    channel_id = int(str(val)[4:])
+                    allowed.add(channel_id)
+                except ValueError:
+                    pass
+            # If positive bare ID: add supergroup (-100...) and group (-) variants
+            elif val > 0:
+                allowed.add(-1000000000000 - val)
+                allowed.add(-val)
+            elif val < 0:
+                # Basic group negative ID: -XXXXXX
+                allowed.add(-val)
+        except ValueError:
+            clean_handle = token.lstrip("@").strip().lower()
+            if clean_handle:
+                allowed.add(clean_handle)
+
+    return allowed if allowed else None
+
+
+def _load_allowed_chat_ids() -> Optional[set[Union[int, str]]]:
+    """Load ALLOWED_CHAT_IDS from the TELEGRAM_ALLOWED_CHAT_IDS environment variable."""
+    return _parse_allowed_chat_ids(os.getenv("TELEGRAM_ALLOWED_CHAT_IDS"))
+
+
+# Initial load from environment
+ALLOWED_CHAT_IDS = _load_allowed_chat_ids()
+
+
+def get_effective_allowed_chat_ids() -> Optional[set[Union[int, str]]]:
+    """Return the currently effective set of allowed chat IDs, or None if allowlist is disabled."""
+    env_raw = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS")
+    if env_raw is not None:
+        return _parse_allowed_chat_ids(env_raw)
+    return ALLOWED_CHAT_IDS
+
+
+def is_chat_allowlist_enabled() -> bool:
+    """Return True if chat allowlist filtering is active."""
+    return get_effective_allowed_chat_ids() is not None
+
+
+def is_chat_allowed(chat_identifier: Any, entity: Any = None) -> bool:
+    """Check whether a chat identifier or entity is permitted by the allowlist.
+
+    If allowlist is not enabled, always returns True.
+    """
+    allowed = get_effective_allowed_chat_ids()
+    if allowed is None:
+        return True
+
+    if chat_identifier is not None:
+        if isinstance(chat_identifier, int):
+            if chat_identifier in allowed:
+                return True
+        elif isinstance(chat_identifier, str):
+            try:
+                int_id = int(chat_identifier)
+                if int_id in allowed:
+                    return True
+            except ValueError:
+                clean = chat_identifier.lstrip("@").strip().lower()
+                if clean and clean in allowed:
+                    return True
+
+    if entity is not None:
+        try:
+            marked_id = get_marked_id(entity)
+            if marked_id in allowed:
+                return True
+        except Exception:
+            pass
+
+        bare_id = getattr(entity, "id", None)
+        if isinstance(bare_id, int) and bare_id in allowed:
+            return True
+
+        username = getattr(entity, "username", None)
+        if username and str(username).lower() in allowed:
+            return True
+
+    return False
+
+
+def check_chat_access(chat_identifier: Any, entity: Any = None) -> Optional[str]:
+    """Return an error message if chat access is restricted, or None if allowed."""
+    if not is_chat_allowed(chat_identifier, entity):
+        return (
+            f"Access to chat '{chat_identifier}' is restricted by privacy policy "
+            "(TELEGRAM_ALLOWED_CHAT_IDS)."
+        )
+    return None
+
+
 # Error code prefix mapping for better error tracing
 class ErrorCategory(str, Enum):
     CHAT = "CHAT"
@@ -856,6 +1102,13 @@ class ErrorCategory(str, Enum):
     AUTH = "AUTH"
     ADMIN = "ADMIN"
     FOLDER = "FOLDER"
+    PRIVACY = "PRIVACY"
+
+
+class ChatAccessDeniedError(Exception):
+    """Exception raised when access to a chat is restricted by privacy policy."""
+
+    pass
 
 
 def _is_flood_wait(error: Exception) -> bool:
@@ -1040,6 +1293,34 @@ def validate_id(*param_names_to_validate):
                             **{param_name: param_value},
                         )
                     kwargs[param_name] = validated_value
+
+                # Per-chat privacy allowlist enforcement
+                if is_chat_allowlist_enabled() and param_name in CHAT_PARAM_NAMES:
+                    check_target = kwargs[param_name]
+                    target_items = (
+                        check_target if isinstance(check_target, list) else [check_target]
+                    )
+                    for item in target_items:
+                        if not is_chat_allowed(item):
+                            resolved_allowed = False
+                            if isinstance(item, str):
+                                try:
+                                    cl = get_client(kwargs.get("account"))
+                                    if cl:
+                                        ent = await resolve_entity(item, cl)
+                                        if is_chat_allowed(item, ent):
+                                            resolved_allowed = True
+                                except Exception:
+                                    pass
+                            if not resolved_allowed:
+                                err = check_chat_access(item)
+                                return log_and_format_error(
+                                    func.__name__,
+                                    ChatAccessDeniedError(err),
+                                    prefix=ErrorCategory.PRIVACY,
+                                    user_message=err,
+                                    **{param_name: param_value},
+                                )
 
             return await func(*args, **kwargs)
 
@@ -1623,7 +1904,10 @@ async def _resolve_with_retries(
             return await get(identifier)
         except ValueError as error:
             last_error = error
-            await client.get_dialogs()
+            try:
+                await client.get_dialogs()
+            except (BotMethodInvalidError, Exception):
+                pass
             try:
                 return await get(identifier)
             except ValueError as error:
@@ -1634,7 +1918,10 @@ async def _resolve_with_retries(
             return await get(identifier)
         except ValueError as error:
             last_error = error
-            await client.get_dialogs()
+            try:
+                await client.get_dialogs()
+            except (BotMethodInvalidError, Exception):
+                pass
             try:
                 return await get(identifier)
             except ValueError as error:

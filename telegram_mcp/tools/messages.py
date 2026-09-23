@@ -418,6 +418,17 @@ async def get_messages(
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
+
+        if is_chat_allowlist_enabled() and not is_chat_allowed(chat_id, entity):
+            err = check_chat_access(chat_id, entity)
+            return log_and_format_error(
+                "get_messages",
+                ChatAccessDeniedError(err),
+                prefix=ErrorCategory.PRIVACY,
+                user_message=err,
+                chat_id=chat_id,
+            )
+
         offset = (page - 1) * page_size
         messages = await cl.get_messages(entity, limit=page_size, add_offset=offset)
         if not messages:
@@ -571,6 +582,17 @@ async def send_message(
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
+
+        if is_chat_allowlist_enabled() and not is_chat_allowed(chat_id, entity):
+            err = check_chat_access(chat_id, entity)
+            return log_and_format_error(
+                "send_message",
+                ChatAccessDeniedError(err),
+                prefix=ErrorCategory.PRIVACY,
+                user_message=err,
+                chat_id=chat_id,
+            )
+
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
             conflict = _chip_conflict(format_date)
             if conflict:
@@ -1337,6 +1359,9 @@ async def get_message_context(
             grouped_id = getattr(msg, "grouped_id", None)
             if grouped_id is not None:
                 record["grouped_id"] = grouped_id
+            link_urls = _link_urls(msg)
+            if link_urls:
+                record["link_urls"] = link_urls
 
             # Check if this message is a reply and get the replied message
             reply_quote = get_reply_quote(msg)
@@ -1357,6 +1382,9 @@ async def get_message_context(
                         _r_username = get_sender_username(replied_msg)
                         if _r_username:
                             replied_record["username"] = _r_username
+                        reply_link_urls = _link_urls(replied_msg)
+                        if reply_link_urls:
+                            replied_record["link_urls"] = reply_link_urls
                         record["replied_message"] = replied_record
                 except Exception:
                     record["replied_message"] = None
@@ -1468,6 +1496,10 @@ async def forward_message(
 
     Telegram validates sender and topic permissions; errors never fall back to
     another sender or topic. Discovery is opt-in and does not change defaults.
+
+    When topic_id, send_as, drop_author or silent is used, the result also lists
+    the destination message IDs Telegram returned for this request, or says
+    that none were returned.
     """
     try:
         if topic_id is not None and (type(topic_id) is not int or topic_id <= 0):
@@ -1497,42 +1529,49 @@ async def forward_message(
                     ids_to_forward = sibling_ids
                     expanded_from_album = True
 
+        destination_note = ""
+        forwarded = None
         if topic_id is not None or send_as is not None or drop_author or silent:
             sender = await resolve_input_entity(send_as, cl) if send_as is not None else None
-            updates = await cl(
-                functions.messages.ForwardMessagesRequest(
-                    from_peer=from_entity,
-                    id=ids_to_forward if isinstance(ids_to_forward, list) else [ids_to_forward],
-                    to_peer=to_entity,
-                    top_msg_id=topic_id,
-                    send_as=sender,
-                    drop_author=drop_author,
-                    silent=silent,
-                )
+            request = functions.messages.ForwardMessagesRequest(
+                from_peer=from_entity,
+                id=ids_to_forward if isinstance(ids_to_forward, list) else [ids_to_forward],
+                to_peer=to_entity,
+                top_msg_id=topic_id,
+                send_as=sender,
+                drop_author=drop_author,
+                silent=silent,
             )
-            forwarded = [
-                update
-                for update in getattr(updates, "updates", [])
+            result = await cl(request)
+            # Correlate only this request's random IDs, in request order; never
+            # infer destination IDs from unrelated updates in the response.
+            returned_ids = {
+                update.random_id: update.id
+                for update in getattr(result, "updates", None) or []
                 if isinstance(update, types.UpdateMessageID)
+            }
+            destination_ids = [
+                returned_ids[random_id]
+                for random_id in request.random_id
+                if random_id in returned_ids
             ]
-            if not forwarded:
-                forwarded = [
-                    update.message
-                    for update in getattr(updates, "updates", [])
-                    if isinstance(update, (types.UpdateNewMessage, types.UpdateNewChannelMessage))
-                ]
+            destination_note = (
+                f" Destination message IDs: {destination_ids or 'not returned by Telegram'}."
+            )
         else:
             forwarded = await cl.forward_messages(to_entity, ids_to_forward, from_entity)
-        new_ids = sent_ids_suffix(forwarded)
+        new_ids = sent_ids_suffix(forwarded) if forwarded is not None else ""
         count = len(ids_to_forward) if isinstance(ids_to_forward, list) else 1
         if count == 1:
-            return f"Message {message_id} forwarded from {from_chat_id} to {to_chat_id}.{new_ids}"
-        if expanded_from_album:
-            return (
+            summary = f"Message {message_id} forwarded from {from_chat_id} to {to_chat_id}."
+        elif expanded_from_album:
+            summary = (
                 f"Album of {count} messages forwarded from {from_chat_id} "
-                f"to {to_chat_id} (auto-expanded from message {message_id}).{new_ids}"
+                f"to {to_chat_id} (auto-expanded from message {message_id})."
             )
-        return f"{count} messages forwarded from {from_chat_id} to {to_chat_id}.{new_ids}"
+        else:
+            summary = f"{count} messages forwarded from {from_chat_id} to {to_chat_id}."
+        return summary + new_ids + destination_note
     except Exception as e:
         return log_and_format_error(
             "forward_message",
@@ -2022,6 +2061,8 @@ async def search_global(
         records = []
         for msg in messages:
             chat = msg.chat
+            if is_chat_allowlist_enabled() and not is_chat_allowed(msg.chat_id, chat):
+                continue
             chat_name = (
                 getattr(chat, "title", None) or getattr(chat, "first_name", "") or str(msg.chat_id)
             )
@@ -2144,6 +2185,7 @@ async def get_pinned_messages(chat_id: Union[int, str], account: str = None) -> 
     annotations=ToolAnnotations(title="Create Poll", openWorldHint=True, destructiveHint=True)
 )
 @with_account(readonly=False)
+@validate_id("chat_id")
 async def create_poll(
     chat_id: int,
     question: str,
@@ -2169,6 +2211,16 @@ async def create_poll(
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
+
+        if is_chat_allowlist_enabled() and not is_chat_allowed(chat_id, entity):
+            err = check_chat_access(chat_id, entity)
+            return log_and_format_error(
+                "create_poll",
+                ChatAccessDeniedError(err),
+                prefix=ErrorCategory.PRIVACY,
+                user_message=err,
+                chat_id=chat_id,
+            )
 
         # Validate options
         if len(options) < 2:
@@ -2452,6 +2504,13 @@ async def get_drafts(account: str = None) -> str:
                             peer_id = -peer.chat_id
                         elif hasattr(peer, "channel_id"):
                             peer_id = -1000000000000 - peer.channel_id
+
+                    if (
+                        is_chat_allowlist_enabled()
+                        and peer_id is not None
+                        and not is_chat_allowed(peer_id)
+                    ):
+                        continue
 
                     draft_data = {
                         "peer_id": peer_id,

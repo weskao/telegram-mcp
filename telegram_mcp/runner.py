@@ -9,10 +9,13 @@ try:
 except UnsafeInstallationError as exc:
     raise SystemExit(str(exc)) from None
 
-from telegram_mcp import runtime
-from telethon.errors import AuthKeyDuplicatedError
-from telegram_mcp import transcription
+from telethon.errors import AuthKeyDuplicatedError, BotMethodInvalidError
+
+from telegram_mcp import runtime as _runtime
+from telegram_mcp import transcription as _transcription
 from telegram_mcp.runtime import *
+
+runtime = _runtime  # fork tests patch runner.runtime; same module as _runtime
 from telegram_mcp.singleton import (
     DEFAULT_GRACE_SECONDS,
     SessionLock,
@@ -146,7 +149,7 @@ async def _serve(transport: str) -> None:
         # Fork: run our own uvicorn so both HTTP transports go through
         # BearerTokenMiddleware (upstream serves them unauthenticated).
         mcp.settings.host = os.getenv("MCP_HOST", "127.0.0.1")
-        mcp.settings.port = int(os.getenv("MCP_PORT", str(runtime._sse_port)))
+        mcp.settings.port = int(os.getenv("MCP_PORT", str(_runtime._sse_port)))
         _configure_transport_security()
         token = os.getenv("TELEGRAM_MCP_TOKEN", "")
         if not token:
@@ -185,8 +188,19 @@ async def _main() -> None:
         print("Warming entity caches (background)...", file=sys.stderr)
 
         async def _warm_caches() -> None:
+            async def _warm_client(label: str, cl: TelegramClient) -> None:
+                try:
+                    await cl.get_dialogs()
+                except BotMethodInvalidError:
+                    print(
+                        f"Skipping entity cache pre-warm for bot client '{label}' (dialogs restricted for bots).",
+                        file=sys.stderr,
+                    )
+                except Exception as exc:
+                    print(f"Entity cache warm failed for '{label}': {exc}", file=sys.stderr)
+
             try:
-                await asyncio.gather(*(cl.get_dialogs() for cl in clients.values()))
+                await asyncio.gather(*(_warm_client(label, cl) for label, cl in clients.items()))
                 print("Entity caches warmed.", file=sys.stderr)
             except Exception as warm_exc:
                 print(f"Entity cache warm failed: {warm_exc}", file=sys.stderr)
@@ -194,10 +208,10 @@ async def _main() -> None:
         warm_task = asyncio.create_task(_warm_caches())
 
         print(
-            f"Telegram client(s) started ({labels}). Running MCP server ({runtime._transport})...",
+            f"Telegram client(s) started ({labels}). Running MCP server ({_runtime._transport})...",
             file=sys.stderr,
         )
-        await _serve(runtime._transport)
+        await _serve(_runtime._transport)
     except Exception as e:
         print(f"Error starting client: {e}", file=sys.stderr)
         if isinstance(e, sqlite3.OperationalError) and "database is locked" in str(e):
@@ -232,11 +246,17 @@ async def _main() -> None:
 
 def main() -> None:
     _configure_allowed_roots_from_cli(sys.argv[1:])
+    # Before _apply_exposed_tools_mode() / _apply_tool_disable_list(): those
+    # prune tools from the manager, and the extension overrides validate tool
+    # names against that same manager. Narrowing send_file's extensions while
+    # send_file is not exposed is a valid configuration, so the name check
+    # has to see the full tool set.
     # Fork blocklist (default dangerous-tool removal) AND upstream read-only
     # exposure mode are complementary — apply both before serving.
+    _runtime._apply_file_extension_overrides()
     _apply_tool_disable_list()
-    runtime._apply_exposed_tools_mode()
-    transcription.validate_transcription_config()
+    _runtime._apply_exposed_tools_mode()
+    _transcription.validate_transcription_config()
     _session_lock_shared()  # fail loudly at startup on a bad toggle
     asyncio.run(_main())
 
