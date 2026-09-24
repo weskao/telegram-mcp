@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot health check for the telegram-mcp server across all five layers:
+# One-shot health check for the telegram-mcp server across all six layers:
 #   1. launchd  — is the background service loaded *and running*?
 #   2. server   — is the HTTP port listening? (401 is healthy: auth is enforced)
 #   3. claude   — is Claude's MCP registration actually connecting?
@@ -12,6 +12,10 @@
 #                 handshakes. Grok expands `${TELEGRAM_MCP_TOKEN}` in the registered
 #                 Authorization header, so this probe publishes that env var the same
 #                 way a Grok session started after `make use-http-grok` would.
+#   6. agy      — is AGY's MCP registration actually connecting? AGY stores
+#                 `${TELEGRAM_MCP_TOKEN}` in its config and expands it at runtime;
+#                 we probe the same way as Grok: resolve the token, then POST
+#                 `initialize` to confirm the handshake.
 #
 # Read-only: never changes config. Exits 0 when every layer is healthy,
 # 1 otherwise, so it can gate other commands (`make health && ...`).
@@ -35,6 +39,7 @@ MCP_NAME="${MCP_NAME:-telegram-mcp}"
 CLAUDE="${CLAUDE:-claude}"
 CODEX="${CODEX:-codex}"
 GROK="${GROK:-grok}"
+AGY="${AGY:-agy}"
 LAUNCHD_LABEL="com.telegram-mcp.server"
 LOG_ERR="$HOME/Library/Logs/telegram-mcp/server.err.log"
 
@@ -148,6 +153,39 @@ else
     bad "$MCP_NAME not registered — run 'make use-http-grok'"
   else
     bad "NOT connected — run 'make use-http-grok'"
+  fi
+fi
+
+# 6. agy — registration plus real handshake via direct HTTP probe. A missing
+#    CLI is not a failure (Claude/Codex/Grok-only setups). AGY stores
+#    `Authorization: Bearer ${TELEGRAM_MCP_TOKEN}` in mcp_config.json and
+#    expands it at load time, so we resolve the token the same way as Codex
+#    (process env, then launchctl) and POST `initialize` ourselves.
+echo "agy    :"
+if ! command -v "$AGY" >/dev/null 2>&1; then
+  skip "agy CLI not found"
+else
+  agy_list="$("$AGY" mcp list 2>/dev/null)" || true
+  if ! grep -qF "$MCP_NAME" <<<"$agy_list"; then
+    bad "$MCP_NAME not registered — run 'make use-http-agy'"
+  else
+    agy_token="$(resolve_token TELEGRAM_MCP_TOKEN)"
+    if [[ -z "$agy_token" ]]; then
+      bad "registered but \$TELEGRAM_MCP_TOKEN is unset — restart the service"
+    else
+      agy_code="$(curl -sS -o /dev/null -w '%{http_code}' -m 5 -X POST \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        -H "Authorization: Bearer $agy_token" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"health-check","version":"0"}}}' \
+        "$MCP_URL" 2>/dev/null)"
+      case "${agy_code:-000}" in
+        200) ok  "handshake OK (token from \$TELEGRAM_MCP_TOKEN)";;
+        401) bad "the token in \$TELEGRAM_MCP_TOKEN was REJECTED (HTTP 401)";;
+        000) bad "server unreachable at $MCP_HOST:$MCP_PORT";;
+        *)   bad "handshake returned HTTP $agy_code";;
+      esac
+    fi
   fi
 fi
 

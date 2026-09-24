@@ -25,11 +25,13 @@ SSE_URL ?= http://$(MCP_HOST):$(MCP_PORT)/sse
 CLAUDE ?= claude
 CODEX ?= codex
 GROK ?= grok
+AGY ?= agy
 CODEX_BEARER_ENV ?= TELEGRAM_MCP_TOKEN
 GROK_BEARER_ENV ?= TELEGRAM_MCP_TOKEN
+AGY_BEARER_ENV ?= TELEGRAM_MCP_TOKEN
 UV ?= uv
 
-.PHONY: list help setup restart start start-http start-sse start-stdio health config-check config-check-claude config-check-codex config-check-grok use-http use-http-claude use-http-codex use-http-grok use-sse use-sse-claude use-stdio use-stdio-claude use-stdio-codex use-stdio-grok sync-upstream-readme
+.PHONY: list help setup restart start start-http start-sse start-stdio health config-check config-check-claude config-check-codex config-check-grok config-check-agy use-http use-http-claude use-http-codex use-http-grok use-http-agy use-sse use-sse-claude use-stdio use-stdio-claude use-stdio-codex use-stdio-grok use-stdio-agy sync-upstream-readme
 
 list:
 	@echo "Available commands:"
@@ -66,10 +68,10 @@ restart: ## Restart the launchd service, wait for MCP_PORT, then run health
 	done
 	@$(MAKE) --no-print-directory health
 
-health: ## Check telegram-mcp health across launchd, HTTP server, and Claude/Codex/Grok registration
-	@MCP_HOST=$(MCP_HOST) MCP_PORT=$(MCP_PORT) MCP_NAME=$(MCP_NAME) CLAUDE=$(CLAUDE) CODEX=$(CODEX) GROK=$(GROK) "$(HEALTH_SCRIPT)"
+health: ## Check telegram-mcp health across launchd, HTTP server, and Claude/Codex/Grok/AGY registration
+	@MCP_HOST=$(MCP_HOST) MCP_PORT=$(MCP_PORT) MCP_NAME=$(MCP_NAME) CLAUDE=$(CLAUDE) CODEX=$(CODEX) GROK=$(GROK) AGY=$(AGY) "$(HEALTH_SCRIPT)"
 
-config-check: config-check-claude config-check-codex config-check-grok ## Show current Claude, Codex, and Grok MCP config for telegram
+config-check: config-check-claude config-check-codex config-check-grok config-check-agy ## Show current Claude, Codex, Grok, and AGY MCP config for telegram
 
 config-check-claude: ## Show current Claude user-scope MCP config
 	@MCP_NAME="$(MCP_NAME)" CLAUDE="$(CLAUDE)" bash "$(CLIENT_SCRIPT)" config-check claude
@@ -80,7 +82,10 @@ config-check-codex: ## Show current Codex MCP config
 config-check-grok: ## Show current Grok MCP config
 	@MCP_NAME="$(MCP_NAME)" GROK="$(GROK)" bash "$(CLIENT_SCRIPT)" config-check grok
 
-use-http: use-http-claude use-http-codex use-http-grok ## Switch Claude, Codex, and Grok MCP config to Streamable HTTP
+config-check-agy: ## Show current AGY MCP config
+	@MCP_NAME="$(MCP_NAME)" AGY="$(AGY)" bash "$(CLIENT_SCRIPT)" config-check agy
+
+use-http: use-http-claude use-http-codex use-http-grok use-http-agy ## Switch Claude, Codex, Grok, and AGY MCP config to Streamable HTTP
 	@echo "Finished configuring installed MCP clients for Streamable HTTP. Missing CLIs were skipped."
 
 use-http-claude: ## Switch Claude MCP config to authenticated Streamable HTTP
@@ -95,14 +100,18 @@ use-http-grok: ## Switch Grok MCP config to authenticated Streamable HTTP
 	@MCP_NAME="$(MCP_NAME)" HTTP_URL="$(HTTP_URL)" GROK="$(GROK)" GROK_BEARER_ENV="$(GROK_BEARER_ENV)" \
 		bash "$(CLIENT_SCRIPT)" register grok http
 
-use-sse: use-sse-claude ## Switch Claude MCP config to legacy SSE (Codex/Grok keep their current transport)
-	@echo "Codex and Grok were left unchanged; this target only switches Claude to legacy SSE."
+use-http-agy: ## Switch AGY MCP config to authenticated Streamable HTTP
+	@MCP_NAME="$(MCP_NAME)" HTTP_URL="$(HTTP_URL)" AGY="$(AGY)" AGY_BEARER_ENV="$(AGY_BEARER_ENV)" \
+		bash "$(CLIENT_SCRIPT)" register agy http
+
+use-sse: use-sse-claude ## Switch Claude MCP config to legacy SSE (Codex/Grok/AGY keep their current transport)
+	@echo "Codex, Grok, and AGY were left unchanged; this target only switches Claude to legacy SSE."
 
 use-sse-claude: ## Switch Claude MCP config to authenticated legacy SSE
 	@MCP_NAME="$(MCP_NAME)" SSE_URL="$(SSE_URL)" HEADERS_HELPER="$(HEADERS_HELPER)" CLAUDE="$(CLAUDE)" \
 		bash "$(CLIENT_SCRIPT)" register claude sse
 
-use-stdio: use-stdio-claude use-stdio-codex use-stdio-grok ## Switch Claude, Codex, and Grok MCP config to stdio
+use-stdio: use-stdio-claude use-stdio-codex use-stdio-grok use-stdio-agy ## Switch Claude, Codex, Grok, and AGY MCP config to stdio
 	@echo "Finished configuring installed MCP clients for stdio. Missing CLIs were skipped."
 
 use-stdio-claude: ## Switch Claude MCP config back to stdio
@@ -116,6 +125,10 @@ use-stdio-codex: ## Switch Codex MCP config back to stdio
 use-stdio-grok: ## Switch Grok MCP config back to stdio
 	@MCP_NAME="$(MCP_NAME)" PROJECT_ROOT="$(PROJECT_ROOT)" START_SCRIPT="$(START_SCRIPT)" GROK="$(GROK)" \
 		bash "$(CLIENT_SCRIPT)" register grok stdio
+
+use-stdio-agy: ## Switch AGY MCP config back to stdio
+	@MCP_NAME="$(MCP_NAME)" PROJECT_ROOT="$(PROJECT_ROOT)" START_SCRIPT="$(START_SCRIPT)" AGY="$(AGY)" \
+		bash "$(CLIENT_SCRIPT)" register agy stdio
 
 sync-upstream-readme: ## Refresh README.upstream.md from upstream/main (never edit it by hand)
 	@git remote get-url upstream >/dev/null 2>&1 || { echo "No 'upstream' remote. Add it: git remote add upstream https://github.com/chigwell/telegram-mcp.git"; exit 1; }

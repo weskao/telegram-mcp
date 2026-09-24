@@ -10,7 +10,7 @@
 #   - Stores all credentials in macOS Keychain
 #   - Configures a dedicated allowed root for local file tools
 #   - Installs and starts the launchd Streamable HTTP server
-#   - Registers each installed Claude Code / Codex / Grok client for authenticated Streamable HTTP
+#   - Registers each installed Claude Code / Codex / Grok / AGY client for authenticated Streamable HTTP
 #
 # Required user input (interactive prompts):
 #   - Telegram API ID and API Hash (from https://my.telegram.org/apps)
@@ -176,7 +176,7 @@ echo
 
 # ── Step 4: MCP clients ──────────────────────────────────────────────────────
 
-echo "步驟 4：確認已安裝的 Claude Code / Codex / Grok MCP 設定…"
+echo "步驟 4：確認已安裝的 Claude Code / Codex / Grok / AGY MCP 設定…"
 make -C "$PROJECT_DIR" config-check
 echo
 
@@ -333,13 +333,13 @@ if [[ "$VERIFY_OK" == 1 ]]; then
   echo "=== 設定完成 ==="
   echo
   echo "下一步："
-  if command -v claude &>/dev/null || command -v codex &>/dev/null || command -v grok &>/dev/null; then
-    echo "  1. 完全結束已安裝的 Claude Code / Codex / Grok，再重新開啟"
+  if command -v claude &>/dev/null || command -v codex &>/dev/null || command -v grok &>/dev/null || command -v agy &>/dev/null; then
+    echo "  1. 完全結束已安裝的 Claude Code / Codex / Grok / AGY，再重新開啟"
     echo "  2. 執行 'make config-check' 確認已安裝的 client 已載入 Streamable HTTP"
     echo "  3. 在任一 client 中問「幫我查看我的 Telegram 帳號資訊」測試"
   else
-    echo "  目前未偵測到 Claude Code、Codex 或 Grok CLI；server 已就緒，但尚無 client 註冊。"
-    echo "  安裝 client 後執行 'make use-http-claude'、'make use-http-codex' 或 'make use-http-grok'。"
+    echo "  目前未偵測到 Claude Code、Codex、Grok 或 AGY CLI；server 已就緒，但尚無 client 註冊。"
+    echo "  安裝 client 後執行 'make use-http-claude'、'make use-http-codex'、'make use-http-grok' 或 'make use-http-agy'。"
   fi
 else
   echo "=== 設定尚未完成 ==="
