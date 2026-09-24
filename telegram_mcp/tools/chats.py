@@ -3,6 +3,7 @@
 import secrets
 import struct
 
+from telethon.errors import BotMethodInvalidError
 from telethon.tl.tlobject import TLObject, TLRequest
 
 from telegram_mcp.runtime import *
@@ -167,7 +168,12 @@ async def get_chats(account: str = None, page: int = 1, page_size: int = 20) -> 
     try:
         cl = get_client(account)
         await ensure_connected(cl)
-        dialogs = await cl.get_dialogs()
+        try:
+            dialogs = await cl.get_dialogs()
+        except BotMethodInvalidError:
+            return "Listing chats/dialogs is not supported for bot accounts (Telegram API restriction: bots cannot fetch dialog lists)."
+        if is_chat_allowlist_enabled():
+            dialogs = [d for d in dialogs if is_chat_allowed(get_marked_id(d.entity), d.entity)]
         start = (page - 1) * page_size
         end = start + page_size
         if start >= len(dialogs):
@@ -479,11 +485,18 @@ async def list_chats(
     try:
         cl = get_client(account)
         await ensure_connected(cl)
-        dialogs = await cl.get_dialogs(limit=limit, archived=archived)
+        try:
+            dialogs = await cl.get_dialogs(limit=limit, archived=archived)
+        except BotMethodInvalidError:
+            return "Listing chats is not supported for bot accounts (Telegram API restriction: bots cannot fetch dialog lists)."
 
         records = []
         for dialog in dialogs:
             entity = dialog.entity
+
+            # Enforce privacy allowlist
+            if is_chat_allowlist_enabled() and not is_chat_allowed(get_marked_id(entity), entity):
+                continue
 
             # Filter by type if requested
             current_type = get_entity_filter_type(entity)
@@ -563,10 +576,8 @@ async def list_chats(
                     elif isinstance(entity, User):
                         full = await cl(functions.users.GetFullUserRequest(id=entity))
                         about_text = getattr(full.full_user, "about", "") or ""
-                except Exception as about_err:
-                    logger.warning(
-                        f"list_chats: failed to fetch about for {entity.id}: {about_err}"
-                    )
+                except Exception:
+                    logger.warning("list_chats: failed to fetch one chat description")
                     about_text = "<error fetching description>"
 
                 record["about"] = sanitize_user_content(about_text, max_length=200)
@@ -606,6 +617,16 @@ async def get_chat(chat_id: Union[int, str], account: str = None) -> str:
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
+
+        if is_chat_allowlist_enabled() and not is_chat_allowed(chat_id, entity):
+            err = check_chat_access(chat_id, entity)
+            return log_and_format_error(
+                "get_chat",
+                ChatAccessDeniedError(err),
+                prefix=ErrorCategory.PRIVACY,
+                user_message=err,
+                chat_id=chat_id,
+            )
 
         record = {"id": get_marked_id(entity)}
 
@@ -685,8 +706,8 @@ async def get_chat(chat_id: Union[int, str], account: str = None) -> str:
                     "date": last_msg.date,
                     "text": sanitize_user_content(last_msg.message),
                 }
-        except Exception as diag_ex:
-            logger.warning(f"Could not get dialog info for {chat_id}: {diag_ex}")
+        except Exception:
+            logger.warning("Could not get requested dialog metadata")
 
         return format_tool_result([], metadata=record)
     except Exception as e:
@@ -705,7 +726,10 @@ async def search_public_chats(query: str, limit: int = 20, account: str = None) 
         cl = get_client(account)
         await ensure_connected(cl)
         result = await cl(functions.contacts.SearchRequest(q=query, limit=limit))
-        entities = [format_entity(e) for e in result.chats + result.users]
+        all_entities = result.chats + result.users
+        if is_chat_allowlist_enabled():
+            all_entities = [e for e in all_entities if is_chat_allowed(get_marked_id(e), e)]
+        entities = [format_entity(e) for e in all_entities]
         return json.dumps(entities, indent=2)
     except Exception as e:
         return log_and_format_error("search_public_chats", e, query=query, limit=limit)
@@ -732,6 +756,7 @@ async def resolve_username(username: str, account: str = None) -> str:
     annotations=ToolAnnotations(title="Get Full Chat", openWorldHint=True, readOnlyHint=True)
 )
 @with_account(readonly=True)
+@validate_id("chat_id")
 async def get_full_chat(chat_id: Union[int, str], account: str = None) -> str:
     """
     Get full info of a channel or group including description/about text.
@@ -746,6 +771,16 @@ async def get_full_chat(chat_id: Union[int, str], account: str = None) -> str:
         cl = get_client(account)
         await ensure_connected(cl)
         entity = await resolve_entity(chat_id, cl)
+
+        if is_chat_allowlist_enabled() and not is_chat_allowed(chat_id, entity):
+            err = check_chat_access(chat_id, entity)
+            return log_and_format_error(
+                "get_full_chat",
+                ChatAccessDeniedError(err),
+                prefix=ErrorCategory.PRIVACY,
+                user_message=err,
+                chat_id=chat_id,
+            )
 
         # Basic ("legacy") groups are not channels: GetFullChannelRequest cannot
         # cast an InputPeerChat and raises TypeError. They are served by
@@ -821,10 +856,8 @@ async def mute_chat(chat_id: Union[int, str], account: str = None) -> str:
             )
             return f"Chat {chat_id} muted (using alternative method)."
         except Exception as alt_e:
-            logger.exception(f"mute_chat (alt method) failed (chat_id={chat_id})")
             return log_and_format_error("mute_chat", alt_e, chat_id=chat_id)
     except Exception as e:
-        logger.exception(f"mute_chat failed (chat_id={chat_id})")
         return log_and_format_error("mute_chat", e, chat_id=chat_id)
 
 
@@ -866,10 +899,8 @@ async def unmute_chat(chat_id: Union[int, str], account: str = None) -> str:
             )
             return f"Chat {chat_id} unmuted (using alternative method)."
         except Exception as alt_e:
-            logger.exception(f"unmute_chat (alt method) failed (chat_id={chat_id})")
             return log_and_format_error("unmute_chat", alt_e, chat_id=chat_id)
     except Exception as e:
-        logger.exception(f"unmute_chat failed (chat_id={chat_id})")
         return log_and_format_error("unmute_chat", e, chat_id=chat_id)
 
 
@@ -972,9 +1003,6 @@ async def get_common_chats(
 
         return "\n".join(lines)
     except Exception as e:
-        logger.exception(
-            f"get_common_chats failed (user_id={user_id}, limit={limit}, max_id={max_id})"
-        )
         return log_and_format_error(
             "get_common_chats", e, user_id=user_id, limit=limit, max_id=max_id
         )
@@ -1063,9 +1091,6 @@ async def get_message_read_by(
             default=json_serializer,
         )
     except Exception as e:
-        logger.exception(
-            f"get_message_read_by failed (chat_id={chat_id}, message_id={message_id})"
-        )
         return log_and_format_error(
             "get_message_read_by", e, chat_id=chat_id, message_id=message_id
         )
@@ -1119,10 +1144,6 @@ async def get_message_link(
             output += f"\nHTML: {html}"
         return output
     except Exception as e:
-        logger.exception(
-            f"get_message_link failed (chat_id={chat_id}, message_id={message_id}, "
-            f"thread={thread})"
-        )
         return log_and_format_error(
             "get_message_link",
             e,

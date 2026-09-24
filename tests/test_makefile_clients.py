@@ -21,9 +21,11 @@ def run_make(target: str, **variables: str) -> subprocess.CompletedProcess[str]:
     [
         ("use-http-claude", "CLAUDE", "make use-http-claude"),
         ("use-http-codex", "CODEX", "make use-http-codex"),
+        ("use-http-grok", "GROK", "make use-http-grok"),
         ("use-sse-claude", "CLAUDE", "make use-sse-claude"),
         ("use-stdio-claude", "CLAUDE", "make use-stdio-claude"),
         ("use-stdio-codex", "CODEX", "make use-stdio-codex"),
+        ("use-stdio-grok", "GROK", "make use-stdio-grok"),
     ],
 )
 def test_missing_client_is_skipped_with_follow_up(target, variable, follow_up):
@@ -39,9 +41,11 @@ def test_missing_client_is_skipped_with_follow_up(target, variable, follow_up):
     [
         ("use-http-claude", "CLAUDE"),
         ("use-http-codex", "CODEX"),
+        ("use-http-grok", "GROK"),
         ("use-sse-claude", "CLAUDE"),
         ("use-stdio-claude", "CLAUDE"),
         ("use-stdio-codex", "CODEX"),
+        ("use-stdio-grok", "GROK"),
     ],
 )
 def test_client_registration_failure_is_not_reported_as_success(target, variable):
@@ -52,15 +56,47 @@ def test_client_registration_failure_is_not_reported_as_success(target, variable
 
 
 @pytest.mark.parametrize(
-    "claude,codex,registered,skipped",
+    "variables,registered,skipped",
     [
-        ("true", "definitely-missing-codex", "Claude", "Codex"),
-        ("definitely-missing-claude", "true", "Codex", "Claude"),
+        (
+            {
+                "CLAUDE": "true",
+                "CODEX": "definitely-missing-codex",
+                "GROK": "definitely-missing-grok",
+            },
+            "Claude",
+            ["Codex", "Grok"],
+        ),
+        (
+            {
+                "CLAUDE": "definitely-missing-claude",
+                "CODEX": "true",
+                "GROK": "definitely-missing-grok",
+            },
+            "Codex",
+            ["Claude", "Grok"],
+        ),
+        (
+            {
+                "CLAUDE": "definitely-missing-claude",
+                "CODEX": "definitely-missing-codex",
+                "GROK": "true",
+            },
+            "Grok",
+            ["Claude", "Codex"],
+        ),
     ],
 )
-def test_http_clients_are_handled_independently(claude, codex, registered, skipped):
-    result = run_make("use-http", CLAUDE=claude, CODEX=codex)
+def test_http_clients_are_handled_independently(variables, registered, skipped):
+    result = run_make("use-http", **variables)
 
     assert result.returncode == 0
     assert f"Registered 'telegram-mcp' for {registered}" in result.stdout
-    assert f"{skipped} CLI not found" in result.stdout
+    for name in skipped:
+        assert f"{name} CLI not found" in result.stdout
+
+
+def test_health_skips_missing_grok_cli():
+    result = run_make("health", GROK="definitely-missing-grok")
+
+    assert "grok CLI not found" in result.stdout

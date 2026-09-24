@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+import re
 import sys
 import json
 import time
@@ -13,7 +14,7 @@ from contextlib import contextmanager
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import List, Dict, Optional, Union, Any
+from typing import List, Dict, Optional, Union, Any, Iterable, get_args
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -24,7 +25,7 @@ from mcp.types import Annotations, ImageContent, TextContent, ToolAnnotations
 from mcp.shared.exceptions import McpError
 from pythonjsonlogger import jsonlogger
 from telethon import TelegramClient, functions, types, utils
-from telethon.errors import AuthKeyDuplicatedError, FloodWaitError
+from telethon.errors import AuthKeyDuplicatedError, FloodWaitError, BotMethodInvalidError
 from telethon.sessions import StringSession
 from telethon.tl.types import (
     User,
@@ -134,8 +135,10 @@ def parse_schedule_date(
             dt = datetime.fromisoformat(str(schedule_date).replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError, OverflowError, OSError) as exc:
-        return None, f"schedule_date could not be parsed ({schedule_date!r}): {exc}"
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None, (
+            "schedule_date could not be parsed. Use an ISO-8601 date/time or Unix timestamp."
+        )
 
     now = datetime.now(timezone.utc)
     if dt <= now:
@@ -194,6 +197,25 @@ class BearerTokenMiddleware:
 # We wrap the low-level request handler (after FastMCP registers it) to inject
 # annotations into the final CallToolResult, preserving structured output.
 _USER_AUDIENCE = Annotations(audience=["user"])
+TOOL_TIMEOUT_SECONDS_DEFAULT = 55.0
+
+
+def _tool_timeout_seconds(value: Optional[str] = None) -> Optional[float]:
+    """Return the server-side ceiling for one MCP tool call.
+
+    The default stays just above the two event-wait tools' 50-second defaults,
+    while ensuring a wedged Telethon request becomes an explicit MCP error
+    before common client-side one-minute timeouts. Set the value to ``0`` or a
+    negative number only for a deliberately unbounded operator session.
+    """
+    raw_value = os.getenv("TELEGRAM_TOOL_TIMEOUT_SECONDS") if value is None else value
+    if not raw_value:
+        return TOOL_TIMEOUT_SECONDS_DEFAULT
+    try:
+        timeout = float(raw_value)
+    except ValueError:
+        return TOOL_TIMEOUT_SECONDS_DEFAULT
+    return timeout if timeout > 0 else None
 
 
 def _install_annotation_hook() -> None:
@@ -202,7 +224,27 @@ def _install_annotation_hook() -> None:
     original_handler = mcp._mcp_server.request_handlers[CallToolRequest]
 
     async def annotated_handler(req):
-        response = await original_handler(req)
+        timeout = _tool_timeout_seconds()
+        if timeout is None:
+            response = await original_handler(req)
+        else:
+            try:
+                response = await asyncio.wait_for(original_handler(req), timeout=timeout)
+            except asyncio.TimeoutError:
+                response = ServerResult(
+                    CallToolResult(
+                        content=[
+                            TextContent(
+                                type="text",
+                                text=(
+                                    "Telegram MCP tool timed out after "
+                                    f"{timeout:g}s (code: GEN-TIMEOUT)."
+                                ),
+                            )
+                        ],
+                        isError=True,
+                    )
+                )
         if isinstance(response, ServerResult) and isinstance(response.root, CallToolResult):
             content = response.root.content
             if content:
@@ -293,6 +335,114 @@ def _apply_exposed_tools_mode(server: FastMCP = mcp, mode: Optional[str] = None)
             server._tool_manager.remove_tool(tool.name)
             removed.append(tool.name)
     return removed
+
+
+_FILE_EXTENSION_TOKEN_PATTERN = re.compile(r"^\.[A-Za-z0-9_-]+$")
+_FILE_EXTENSIONS_ENTRY_SEPARATOR = ";"
+_FILE_EXTENSIONS_TOOL_SEPARATOR = ":"
+_FILE_EXTENSIONS_LIST_SEPARATOR = ","
+
+
+def _get_file_extension_overrides(value: Optional[str] = None) -> dict[str, set[str]]:
+    """Parse ``TELEGRAM_FILE_EXTENSIONS`` into a tool -> extension-set mapping.
+
+    ``TELEGRAM_FILE_EXTENSIONS=send_file:.pdf,.png;upload_file:.pdf`` mirrors
+    the ``TELEGRAM_EXPOSED_TOOLS`` convention: unset (or blank) means no
+    overrides at all, which keeps today's behaviour unchanged. A malformed
+    entry fails loudly here, at parse time, the same way a malformed
+    ``TELEGRAM_EXPOSED_TOOLS`` mode fails loudly in
+    ``_get_exposed_tools_mode`` -- a typo must not silently produce a
+    narrower (or wider) allowlist that looks like it worked.
+
+    This only parses the tool -> extensions shape; it does not know the set
+    of real tool names, so it cannot reject an unknown tool. That check
+    happens in ``_apply_file_extension_overrides``, which has a server to
+    check against.
+    """
+    raw_value = os.getenv("TELEGRAM_FILE_EXTENSIONS", "") if value is None else value
+    raw_value = raw_value.strip()
+    if not raw_value:
+        return {}
+
+    overrides: dict[str, set[str]] = {}
+    for entry in raw_value.split(_FILE_EXTENSIONS_ENTRY_SEPARATOR):
+        entry = entry.strip()
+        if not entry:
+            continue
+        tool_name, separator, raw_extensions = entry.partition(_FILE_EXTENSIONS_TOOL_SEPARATOR)
+        tool_name = tool_name.strip().lower()
+        if not separator or not tool_name:
+            raise SystemExit(
+                f"Invalid TELEGRAM_FILE_EXTENSIONS '{raw_value}'. Each entry must look "
+                f"like 'tool{_FILE_EXTENSIONS_TOOL_SEPARATOR}.ext{_FILE_EXTENSIONS_LIST_SEPARATOR}.ext', "
+                f"entries separated by '{_FILE_EXTENSIONS_ENTRY_SEPARATOR}'."
+            )
+
+        extensions: set[str] = set()
+        for raw_extension in raw_extensions.split(_FILE_EXTENSIONS_LIST_SEPARATOR):
+            token = raw_extension.strip().lower()
+            if not token:
+                raise SystemExit(
+                    f"Invalid TELEGRAM_FILE_EXTENSIONS '{raw_value}'. Tool '{tool_name}' "
+                    "has an empty extension entry."
+                )
+            if not token.startswith("."):
+                token = f".{token}"
+            if not _FILE_EXTENSION_TOKEN_PATTERN.match(token):
+                raise SystemExit(
+                    f"Invalid TELEGRAM_FILE_EXTENSIONS '{raw_value}'. Malformed extension "
+                    f"'{raw_extension.strip()}' for tool '{tool_name}'."
+                )
+            extensions.add(token)
+
+        # extensions is never empty here: an empty raw_extensions still yields
+        # one blank token from split(","), which is caught above.
+        if tool_name in overrides:
+            # Fail loudly rather than last-wins: silently dropping the first
+            # list would hand the operator a narrower or wider allowlist than
+            # the one they wrote, with no way to notice.
+            raise SystemExit(
+                f"Invalid TELEGRAM_FILE_EXTENSIONS '{raw_value}'. Tool "
+                f"'{tool_name}' is named more than once."
+            )
+        overrides[tool_name] = extensions
+    return overrides
+
+
+def _apply_file_extension_overrides(
+    server: FastMCP = mcp, value: Optional[str] = None
+) -> dict[str, set[str]]:
+    """Rebuild ``EXTENSION_ALLOWLISTS`` from defaults plus ``TELEGRAM_FILE_EXTENSIONS``.
+
+    Overrides merge over ``_DEFAULT_EXTENSION_ALLOWLISTS``: naming a tool
+    that already has a hardcoded default replaces that tool's whole set
+    (not a union), and any tool not mentioned keeps its default (including
+    ``send_file``/``upload_file``, which have no default and so stay
+    unrestricted when unset). This is the only thing that changes --
+    ``_ensure_extension_allowed`` itself is untouched and keeps reading the
+    module-level ``EXTENSION_ALLOWLISTS`` dict.
+
+    An unknown tool name aborts startup exactly like an unknown name in a
+    ``TELEGRAM_EXPOSED_TOOLS`` allowlist: validated against the server's own
+    registered tools, not a hardcoded guess at what tools exist. That check
+    reads the tool manager, so this must run *before*
+    ``_apply_exposed_tools_mode`` prunes it -- otherwise narrowing the
+    extensions of a tool that exposure hid would abort startup on a valid
+    configuration.
+    """
+    global EXTENSION_ALLOWLISTS
+    overrides = _get_file_extension_overrides(value)
+    if overrides:
+        registered = {tool.name for tool in server._tool_manager.list_tools()}
+        unknown = sorted(set(overrides) - registered)
+        if unknown:
+            # Fail loudly: a typo must not silently degrade into an allowlist
+            # that looks like it worked.
+            raise SystemExit(
+                f"Invalid TELEGRAM_FILE_EXTENSIONS: unknown tool(s) {', '.join(unknown)}."
+            )
+    EXTENSION_ALLOWLISTS = {**_DEFAULT_EXTENSION_ALLOWLISTS, **overrides}
+    return EXTENSION_ALLOWLISTS
 
 
 # ---------------------------------------------------------------------------
@@ -413,15 +563,11 @@ def _get_flood_sleep_threshold() -> int:
     try:
         val = int(raw)
         if val < 0:
-            logger.warning(
-                f"Negative TELEGRAM_FLOOD_SLEEP_THRESHOLD='{raw}' clamped to 0 (fail-fast mode)"
-            )
+            logger.warning("Negative TELEGRAM_FLOOD_SLEEP_THRESHOLD clamped to 0 (fail-fast mode)")
             return 0
         return val
     except ValueError:
-        logger.warning(
-            f"Invalid TELEGRAM_FLOOD_SLEEP_THRESHOLD='{raw}', falling back to default 60s"
-        )
+        logger.warning("Invalid TELEGRAM_FLOOD_SLEEP_THRESHOLD; falling back to default 60s")
         return 60
 
 
@@ -749,25 +895,32 @@ try:
     # Add handlers to logger
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
-    logger.info(f"Logging initialized to {log_file_path}")
-except Exception as log_error:
-    print(f"WARNING: Error setting up log file: {log_error}", file=sys.stderr)
+    logger.info("Logging initialized")
+except Exception:
+    print("WARNING: Error setting up log file; using console logging only.", file=sys.stderr)
     # Fallback to console-only logging
     logger.addHandler(console_handler)
-    logger.error(f"Failed to set up log file handler: {log_error}")
+    logger.error("Failed to set up log file handler; using console logging only.")
 
 
 # File-path tool security configuration
 SERVER_ALLOWED_ROOTS: list[Path] = []
 DEFAULT_DOWNLOAD_SUBDIR = "downloads"
 DISALLOWED_PATH_PATTERNS = ("*", "?", "[", "]", "{", "}", "~", "\x00")
-EXTENSION_ALLOWLISTS: dict[str, set[str]] = {
+_DEFAULT_EXTENSION_ALLOWLISTS: dict[str, set[str]] = {
     "send_voice": {".ogg", ".opus"},
     "send_sticker": {".webp"},
     "set_profile_photo": {".jpg", ".jpeg", ".png", ".webp"},
     "edit_chat_photo": {".jpg", ".jpeg", ".png", ".webp"},
 }
+# Mutable, TELEGRAM_FILE_EXTENSIONS-aware allowlist actually consulted by
+# _ensure_extension_allowed(). Rebuilt from _DEFAULT_EXTENSION_ALLOWLISTS by
+# _apply_file_extension_overrides() at startup; defaults to the hardcoded
+# values so importing this module without calling that function (e.g. tests)
+# keeps today's behaviour.
+EXTENSION_ALLOWLISTS: dict[str, set[str]] = dict(_DEFAULT_EXTENSION_ALLOWLISTS)
 MAX_FILE_BYTES: dict[str, int] = {
+    "download_media": 200 * 1024 * 1024,  # 200 MB
     "send_file": 200 * 1024 * 1024,  # 200 MB
     "upload_file": 200 * 1024 * 1024,
     "send_voice": 100 * 1024 * 1024,
@@ -791,14 +944,8 @@ ROOTS_STATUS_TRANSPORT_UNAVAILABLE = "transport_unavailable"
 # up front (see _client_roots_channel_unavailable), so this budget only ever
 # applies to a client that accepted the request and went quiet — 10s is generous
 # for a local round-trip while still failing inside a normal tool-call budget.
-# Env var name matches upstream PR #165
-# (https://github.com/chigwell/telegram-mcp/pull/165), which fixes the same
-# hang with a timeout alone; the default differs because the structural case
-# no longer reaches here.
-# Review trigger: PR #165 is still OPEN (checked 2026-08-21). If it merges,
-# diff its timeout logic against this file — its default is 1s, ours is 10s —
-# and decide whether the transport-detection guard above still earns its keep
-# on top of whatever lands upstream.
+# Keep the fork's original environment variable as the fallback for the
+# upstream TELEGRAM_ROOTS_TIMEOUT_SECONDS override.
 ROOTS_REQUEST_TIMEOUT_SECONDS = _parse_float_env(
     os.getenv("TELEGRAM_ROOTS_REQUEST_TIMEOUT_SECONDS"), 10.0
 )
@@ -806,6 +953,142 @@ ROOTS_REQUEST_TIMEOUT_SECONDS = _parse_float_env(
 # The transport can only become unusable once per process, so say it once
 # instead of on every file-path call.
 _roots_transport_reported = False
+
+# Some clients accept the server-initiated roots/list request but never answer
+# it (observed with Claude Code over streamable HTTP), which would otherwise
+# hang every file-path tool forever instead of failing.
+ROOTS_REQUEST_TIMEOUT_DEFAULT = 10.0
+
+
+# Per-chat access control allowlist configuration (TELEGRAM_ALLOWED_CHAT_IDS)
+ALLOWED_CHAT_IDS: Optional[set[Union[int, str]]] = None
+CHAT_PARAM_NAMES: frozenset[str] = frozenset({"chat_id", "from_chat_id", "to_chat_id", "channel"})
+
+
+def _parse_allowed_chat_ids(
+    raw: Optional[Union[str, Iterable[Union[int, str]]]],
+) -> Optional[set[Union[int, str]]]:
+    """Parse TELEGRAM_ALLOWED_CHAT_IDS into a set of allowed IDs and usernames.
+
+    Supports comma-separated integer IDs (e.g. '12345678,-100123456789') and
+    usernames/handles (e.g. '@mychat,other_channel').
+    Also automatically indexes marked variants for bare integers and vice versa
+    so that both marked IDs (-100...) and bare positive IDs match.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return None
+        tokens = [t.strip() for t in raw.split(",") if t.strip()]
+    elif isinstance(raw, (list, tuple, set)):
+        tokens = [str(t).strip() for t in raw if str(t).strip()]
+    else:
+        return None
+
+    if not tokens:
+        return None
+
+    allowed: set[Union[int, str]] = set()
+    for token in tokens:
+        try:
+            val = int(token)
+            allowed.add(val)
+            # If negative supergroup: -100XXXXXXXXXX
+            if str(val).startswith("-100") and len(str(val)) > 4:
+                try:
+                    channel_id = int(str(val)[4:])
+                    allowed.add(channel_id)
+                except ValueError:
+                    pass
+            # If positive bare ID: add supergroup (-100...) and group (-) variants
+            elif val > 0:
+                allowed.add(-1000000000000 - val)
+                allowed.add(-val)
+            elif val < 0:
+                # Basic group negative ID: -XXXXXX
+                allowed.add(-val)
+        except ValueError:
+            clean_handle = token.lstrip("@").strip().lower()
+            if clean_handle:
+                allowed.add(clean_handle)
+
+    return allowed if allowed else None
+
+
+def _load_allowed_chat_ids() -> Optional[set[Union[int, str]]]:
+    """Load ALLOWED_CHAT_IDS from the TELEGRAM_ALLOWED_CHAT_IDS environment variable."""
+    return _parse_allowed_chat_ids(os.getenv("TELEGRAM_ALLOWED_CHAT_IDS"))
+
+
+# Initial load from environment
+ALLOWED_CHAT_IDS = _load_allowed_chat_ids()
+
+
+def get_effective_allowed_chat_ids() -> Optional[set[Union[int, str]]]:
+    """Return the currently effective set of allowed chat IDs, or None if allowlist is disabled."""
+    env_raw = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS")
+    if env_raw is not None:
+        return _parse_allowed_chat_ids(env_raw)
+    return ALLOWED_CHAT_IDS
+
+
+def is_chat_allowlist_enabled() -> bool:
+    """Return True if chat allowlist filtering is active."""
+    return get_effective_allowed_chat_ids() is not None
+
+
+def is_chat_allowed(chat_identifier: Any, entity: Any = None) -> bool:
+    """Check whether a chat identifier or entity is permitted by the allowlist.
+
+    If allowlist is not enabled, always returns True.
+    """
+    allowed = get_effective_allowed_chat_ids()
+    if allowed is None:
+        return True
+
+    if chat_identifier is not None:
+        if isinstance(chat_identifier, int):
+            if chat_identifier in allowed:
+                return True
+        elif isinstance(chat_identifier, str):
+            try:
+                int_id = int(chat_identifier)
+                if int_id in allowed:
+                    return True
+            except ValueError:
+                clean = chat_identifier.lstrip("@").strip().lower()
+                if clean and clean in allowed:
+                    return True
+
+    if entity is not None:
+        try:
+            marked_id = get_marked_id(entity)
+            if marked_id in allowed:
+                return True
+        except Exception:
+            pass
+
+        bare_id = getattr(entity, "id", None)
+        if isinstance(bare_id, int) and bare_id in allowed:
+            return True
+
+        username = getattr(entity, "username", None)
+        if username and str(username).lower() in allowed:
+            return True
+
+    return False
+
+
+def check_chat_access(chat_identifier: Any, entity: Any = None) -> Optional[str]:
+    """Return an error message if chat access is restricted, or None if allowed."""
+    if not is_chat_allowed(chat_identifier, entity):
+        return (
+            f"Access to chat '{chat_identifier}' is restricted by privacy policy "
+            "(TELEGRAM_ALLOWED_CHAT_IDS)."
+        )
+    return None
 
 
 # Error code prefix mapping for better error tracing
@@ -819,6 +1102,13 @@ class ErrorCategory(str, Enum):
     AUTH = "AUTH"
     ADMIN = "ADMIN"
     FOLDER = "FOLDER"
+    PRIVACY = "PRIVACY"
+
+
+class ChatAccessDeniedError(Exception):
+    """Exception raised when access to a chat is restricted by privacy policy."""
+
+    pass
 
 
 def _is_flood_wait(error: Exception) -> bool:
@@ -856,7 +1146,7 @@ def log_and_format_error(
         prefix: Error code prefix (e.g., ErrorCategory.CHAT, "VALIDATION-001").
             If None, it will be derived from the function_name.
         user_message: A custom user-facing message to return. If None, a generic one is created.
-        **kwargs: Additional context parameters to include in the log.
+        **kwargs: Additional context parameters. These are never written to persistent logs.
 
     Returns:
         A user-friendly error message with an error code.
@@ -881,18 +1171,14 @@ def log_and_format_error(
         prefix_str = prefix.value if isinstance(prefix, ErrorCategory) else (prefix or "GEN")
         error_code = f"{prefix_str}-ERR-{abs(hash(function_name)) % 1000:03d}"
 
-    # Format the additional context parameters
-    context = ", ".join(f"{k}={v}" for k, v in kwargs.items())
-
     # Telegram FloodWait (Rate Limiting) must be explicitly formatted for LLM agents.
     # LLMs will blindly retry generic errors, escalating the flood penalty and risking bans.
-    # We log at WARNING level and return explicit wait duration with a strict no-retry directive.
+    # Log only a categorical warning; the user-facing response below carries the
+    # actionable wait duration. The persistent error-file handler intentionally
+    # does not store WARNING records.
     if _is_flood_wait(error):
         seconds = getattr(error, "seconds", None) or 0
-        logger.warning(
-            f"Telegram FloodWait in {function_name} ({context}) - "
-            f"Rate limited for {seconds}s - Code: {error_code}"
-        )
+        logger.warning("Telegram FloodWait; retry only after the reported delay.")
         if user_message:
             return user_message
         wait_clause = f"{seconds} seconds" if seconds > 0 else "an unknown duration"
@@ -901,8 +1187,9 @@ def log_and_format_error(
             f"before repeating this operation. Do NOT retry immediately (code: {error_code})."
         )
 
-    # Log the full technical error
-    logger.error(f"Error in {function_name} ({context}) - Code: {error_code}", exc_info=True)
+    # Keep persistent logs useful without recording exception text, tracebacks,
+    # identifiers, user content, provider payloads, or local paths.
+    logger.error("Telegram MCP operation failed; see the returned stable error code.")
 
     # Return a user-friendly message
     if user_message:
@@ -916,12 +1203,12 @@ def log_and_format_error(
     if _is_schema_drift(error):
         return (
             f"MTProto schema mismatch: the installed Telethon does not know an object the "
-            f"server sent ({error}). This is NOT a missing user or chat — the data arrived, "
+            f"server sent. This is NOT a missing user or chat — the data arrived, "
             f"parsing it failed. Upgrade Telethon; if it is already the latest release, its "
             f"schema is behind the current layer (code: {error_code})."
         )
 
-    return f"An error occurred (code: {error_code}). Check mcp_errors.log for details."
+    return f"An error occurred (code: {error_code})."
 
 
 def validate_id(*param_names_to_validate):
@@ -1007,6 +1294,34 @@ def validate_id(*param_names_to_validate):
                         )
                     kwargs[param_name] = validated_value
 
+                # Per-chat privacy allowlist enforcement
+                if is_chat_allowlist_enabled() and param_name in CHAT_PARAM_NAMES:
+                    check_target = kwargs[param_name]
+                    target_items = (
+                        check_target if isinstance(check_target, list) else [check_target]
+                    )
+                    for item in target_items:
+                        if not is_chat_allowed(item):
+                            resolved_allowed = False
+                            if isinstance(item, str):
+                                try:
+                                    cl = get_client(kwargs.get("account"))
+                                    if cl:
+                                        ent = await resolve_entity(item, cl)
+                                        if is_chat_allowed(item, ent):
+                                            resolved_allowed = True
+                                except Exception:
+                                    pass
+                            if not resolved_allowed:
+                                err = check_chat_access(item)
+                                return log_and_format_error(
+                                    func.__name__,
+                                    ChatAccessDeniedError(err),
+                                    prefix=ErrorCategory.PRIVACY,
+                                    user_message=err,
+                                    **{param_name: param_value},
+                                )
+
             return await func(*args, **kwargs)
 
         return wrapper
@@ -1057,6 +1372,83 @@ def make_rich_input(parse_mode: str, text: str):
     if parse_mode == "rich_html":
         return types.InputRichMessageHTML(html=text)
     return types.InputRichMessageMarkdown(markdown=text)
+
+
+# Reading a rich message is the other direction, and it needs its own walk: a
+# channel posting in this format leaves msg.message empty and carries every word
+# as Instant-View page blocks, so a reader that only looks at msg.message
+# reports the whole post as empty.
+_RICH_TEXT_TYPES = tuple(get_args(types.TypeRichText))
+
+# RichText is a recursive tree: a node either holds a plain string, wraps
+# another node, or concatenates a list of them. Dispatching on the field rather
+# than on the class keeps a node type Telegram adds later flattening instead of
+# vanishing.
+_RICH_TEXT_FIELDS = ("texts", "text", "alt", "source")
+
+# Where a page block, list item, table row or caption keeps its words. Same walk
+# covers the blocks nested inside details, collages and embedded posts.
+_PAGE_TEXT_FIELDS = (
+    "title",
+    "subtitle",
+    "author",
+    "text",
+    "caption",
+    "credit",
+    "items",
+    "blocks",
+    "rows",
+    "articles",
+)
+
+
+def rich_text_to_str(node) -> str:
+    """Flatten one RichText node into plain text.
+
+    TextCustomEmoji contributes its alt character - dropping it would silently
+    eat the emoji a channel used as a bullet or a heading marker.
+    """
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, (list, tuple)):
+        return "".join(rich_text_to_str(item) for item in node)
+    for field in _RICH_TEXT_FIELDS:
+        value = getattr(node, field, None)
+        if value is not None:
+            return rich_text_to_str(value)
+    return ""  # TextEmpty, TextImage and anything else carrying no text
+
+
+def _page_lines(node) -> List[str]:
+    """Text lines carried by a page block, list item, table row or caption."""
+    if node is None:
+        return []
+    if isinstance(node, (list, tuple)):
+        return [line for item in node for line in _page_lines(item)]
+    if isinstance(node, _RICH_TEXT_TYPES):
+        text = rich_text_to_str(node).strip()
+        return [text] if text else []
+    cells = getattr(node, "cells", None)
+    if cells is not None:  # a table row reads as one line, not one line per cell
+        row = " | ".join(line for cell in cells for line in _page_lines(cell))
+        return [row] if row else []
+    return [line for f in _PAGE_TEXT_FIELDS for line in _page_lines(getattr(node, f, None))]
+
+
+def rich_message_text(msg) -> str:
+    """Plain text of a rich (block-format) message, "" when there is none.
+
+    Each block becomes a paragraph and the lines within one block stay together,
+    so a list reads as a list instead of one run-on line. An unknown block type
+    yields nothing rather than breaking the whole message.
+    """
+    blocks = getattr(getattr(msg, "rich_message", None), "blocks", None)
+    if not blocks:
+        return ""
+    paragraphs = ("\n".join(_page_lines(block)) for block in blocks)
+    return "\n\n".join(p for p in paragraphs if p)
 
 
 def premium_required_result(action: str) -> str:
@@ -1170,11 +1562,14 @@ def load_aliases(strict: bool = False) -> Dict[str, Dict[str, Any]]:
     except FileNotFoundError:
         return {}
     except (OSError, ValueError, TypeError) as error:
-        logger.warning("Ignoring unreadable aliases file %s: %s", path, error)
+        logger.warning("Ignoring unreadable aliases file; saved aliases were not changed.")
         if strict:
             # Refuse to write over data we could not read: a degraded read plus a
             # write-back would silently delete every alias in the file.
-            raise AliasStoreUnreadable(str(error)) from error
+            raise AliasStoreUnreadable(
+                "Saved contacts could not be read; no changes were written. "
+                "Check the aliases file and retry."
+            ) from error
         return {}
 
     records: Dict[str, Dict[str, Any]] = {}
@@ -1509,7 +1904,10 @@ async def _resolve_with_retries(
             return await get(identifier)
         except ValueError as error:
             last_error = error
-            await client.get_dialogs()
+            try:
+                await client.get_dialogs()
+            except (BotMethodInvalidError, Exception):
+                pass
             try:
                 return await get(identifier)
             except ValueError as error:
@@ -1520,7 +1918,10 @@ async def _resolve_with_retries(
             return await get(identifier)
         except ValueError as error:
             last_error = error
-            await client.get_dialogs()
+            try:
+                await client.get_dialogs()
+            except (BotMethodInvalidError, Exception):
+                pass
             try:
                 return await get(identifier)
             except ValueError as error:
@@ -1867,6 +2268,22 @@ def _client_roots_channel_unavailable() -> Optional[str]:
     return None
 
 
+def _roots_request_timeout(value: Optional[str] = None) -> Optional[float]:
+    """Seconds to wait for the client's ``roots/list`` reply.
+
+    Override with ``TELEGRAM_ROOTS_TIMEOUT_SECONDS``; ``0`` or a negative value
+    waits forever (the pre-timeout behavior).
+    """
+    raw_value = os.getenv("TELEGRAM_ROOTS_TIMEOUT_SECONDS") if value is None else value
+    if raw_value is None or not str(raw_value).strip():
+        return ROOTS_REQUEST_TIMEOUT_SECONDS
+    try:
+        timeout = float(raw_value)
+    except (TypeError, ValueError):
+        return ROOTS_REQUEST_TIMEOUT_DEFAULT
+    return timeout if timeout > 0 else None
+
+
 async def _get_effective_allowed_roots_with_status(
     ctx: Optional[Context],
 ) -> tuple[List[Path], str]:
@@ -1884,42 +2301,37 @@ async def _get_effective_allowed_roots_with_status(
             # logger is pinned to ERROR for production, so anything quieter is
             # invisible exactly where this matters.
             logger.error(
-                "Client MCP Roots are unreachable (%s); file-path tools depend "
-                "on server CLI roots here.",
-                unavailable_reason,
+                "Client MCP Roots are unreachable on this transport; file-path tools depend "
+                "on server CLI roots here."
             )
         if fallback_roots and not _server_roots_fallback_explicitly_disabled():
             return fallback_roots, ROOTS_STATUS_TRANSPORT_FALLBACK
         return [], ROOTS_STATUS_TRANSPORT_UNAVAILABLE
 
     try:
-        list_roots_result = await asyncio.wait_for(
-            ctx.session.list_roots(), timeout=ROOTS_REQUEST_TIMEOUT_SECONDS
-        )
-    except (asyncio.TimeoutError, TimeoutError):
-        # Reached only when the transport looked capable but the client stayed
-        # silent. Requiring the explicit opt-in here matches the treatment of
-        # other unexpected failures: a silent client is not evidence that
-        # server-side roots were intended to apply.
+        timeout = _roots_request_timeout()
+        if timeout is None:
+            list_roots_result = await ctx.session.list_roots()
+        else:
+            list_roots_result = await asyncio.wait_for(ctx.session.list_roots(), timeout)
+    except asyncio.TimeoutError:
         if fallback_roots and _server_roots_fallback_enabled():
             logger.warning(
-                "MCP roots request timed out after %ss; falling back to server "
-                "CLI roots (TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK).",
-                ROOTS_REQUEST_TIMEOUT_SECONDS,
+                "MCP client did not answer roots/list before the configured timeout "
+                "(TELEGRAM_ROOTS_TIMEOUT_SECONDS); falling back to server CLI roots "
+                "(TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK)."
             )
             return fallback_roots, ROOTS_STATUS_SERVER_FALLBACK
         logger.error(
-            "MCP roots request timed out after %ss; disabling file-path tools " "for safety.",
-            ROOTS_REQUEST_TIMEOUT_SECONDS,
+            "MCP client did not answer roots/list before the configured timeout "
+            "(TELEGRAM_ROOTS_TIMEOUT_SECONDS); disabling file-path tools instead "
+            "of hanging."
         )
         return [], ROOTS_STATUS_TIMEOUT
     except Exception as error:
         recovered_roots = _coerce_paths_from_list_roots_validation_error(error)
         if recovered_roots:
-            logger.warning(
-                "MCP client returned non-URI roots; recovered %d path(s) from validation error.",
-                len(recovered_roots),
-            )
+            logger.warning("MCP client returned non-URI roots; recovered validated paths.")
             return recovered_roots, ROOTS_STATUS_READY
         if _is_roots_unsupported_error(error):
             if fallback_roots:
@@ -1931,12 +2343,9 @@ async def _get_effective_allowed_roots_with_status(
             logger.warning(
                 "MCP roots request failed; falling back to server CLI roots "
                 "(TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK).",
-                exc_info=True,
             )
             return fallback_roots, ROOTS_STATUS_SERVER_FALLBACK
-        logger.error(
-            "MCP roots request failed; disabling file-path tools for safety.", exc_info=True
-        )
+        logger.error("MCP roots request failed; disabling file-path tools for safety.")
         return [], ROOTS_STATUS_ERROR
 
     client_roots: List[Path] = []
@@ -1997,9 +2406,9 @@ async def _ensure_allowed_roots(
                 [],
                 (
                     f"{tool_name} is disabled because the MCP client did not answer the "
-                    f"Roots request within {ROOTS_REQUEST_TIMEOUT_SECONDS}s. Pass server "
-                    "CLI roots and set TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1, or use a "
-                    "transport whose client can answer Roots requests."
+                    "roots/list request. Configure server CLI roots and set "
+                    "TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1, or raise "
+                    "TELEGRAM_ROOTS_TIMEOUT_SECONDS."
                 ),
             )
         return (
@@ -2120,7 +2529,10 @@ def _configure_allowed_roots_from_cli(argv: Optional[List[str]] = None) -> None:
             continue
         root = expand_env_path(raw_root)
         if not root.exists():
-            raise SystemExit(f"Allowed root does not exist: {root}")
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                raise SystemExit(f"Allowed root does not exist: {root}")
         resolved = root.resolve(strict=True)
         resolved_roots.append(resolved)
 
@@ -2146,6 +2558,7 @@ _DANGEROUS_TOOLS: frozenset[str] = frozenset(
         "delete_profile_photo",
         "delete_chat_photo",
         "ban_user",
+        "remove_user",
         "promote_admin",
         "demote_admin",
         "edit_admin_rights",

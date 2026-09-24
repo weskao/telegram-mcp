@@ -2,7 +2,7 @@
 
 每位成員需要用**自己的** Telegram 帳號完成以下步驟。Session 綁定個人帳號，不能共用。
 
-**推薦方式：Streamable HTTP 模式**。一個 server 在本機執行，Claude Code 與 Codex 透過 HTTP 共用同一條 session，避免多個 IDE 同時啟動時互相衝突。預設用 `bash scripts/setup.sh` 安裝並登記兩個 client，不需要在各專案中重複設定。
+**推薦方式：Streamable HTTP 模式**。一個 server 在本機執行，Claude Code、Codex 與 Grok 透過 HTTP 共用同一條 session，避免多個 IDE 同時啟動時互相衝突。預設用 `bash scripts/setup.sh` 安裝並登記已安裝的 client，不需要在各專案中重複設定。
 
 > 若不想 clone 本專案，可改用[備用：stdio 模式](#備用stdio-模式)，但同一台機器上多個 IDE 同時使用時會有 session 衝突問題。
 
@@ -31,9 +31,9 @@ cd telegram-mcp
 
 <!-- -->
 
-> **預設安裝方式：** clone 完成後可直接執行 `bash scripts/setup.sh`。script 會安裝缺少的 uv、引導你完成 Telegram 憑證與 session string、建立專用檔案交換目錄 `~/Downloads/telegram_mcp_files`、安裝 launchd 常駐 Streamable HTTP server，並把 Claude Code 與 Codex MCP 設定指向 `http://127.0.0.1:8765/mcp`。
+> **預設安裝方式：** clone 完成後可直接執行 `make setup`（等同 `bash scripts/setup.sh`）。script 會安裝缺少的 uv、引導你完成 Telegram 憑證與 session string、建立專用檔案交換目錄 `~/Downloads/telegram_mcp_files`、安裝 launchd 常駐 Streamable HTTP server，並把 Claude Code、Codex 與 Grok MCP 設定指向 `http://127.0.0.1:8765/mcp`。
 >
-> **常用指令：** 可執行 `make list` 查看所有 Makefile 指令。HTTP 模式用 `make start` 或 `make start-http` 前景啟動 server，再用 `make use-http` 將 Claude Code 與 Codex MCP 設定切到 `http://127.0.0.1:8765/mcp`。
+> **常用指令：** 可執行 `make list` 查看所有 Makefile 指令。HTTP 模式用 `make start` 或 `make start-http` 前景啟動 server，再用 `make use-http` 將 Claude Code、Codex 與 Grok MCP 設定切到 `http://127.0.0.1:8765/mcp`。
 
 ---
 
@@ -90,10 +90,10 @@ uv run telegram-mcp-generate-session
 若要使用預設一鍵安裝，可從這裡直接執行：
 
 ```bash
-bash scripts/setup.sh
+make setup
 ```
 
-這會自動完成 Keychain 寫入、建立 `~/Downloads/telegram_mcp_files` 作為專用 allowed root、安裝 launchd Streamable HTTP 常駐服務，以及 Claude Code／Codex MCP 設定。以下手動設定只在不使用 `setup.sh` 時需要。
+這會自動完成 Keychain 寫入、建立 `~/Downloads/telegram_mcp_files` 作為專用 allowed root、安裝 launchd Streamable HTTP 常駐服務，以及 Claude Code／Codex／Grok MCP 設定。以下手動設定只在不使用 `make setup` 時需要。
 
 如果你已經把 Telegram 憑證存入 macOS Keychain，並且下列三個 item 都存在，HTTP / SSE / stdio 的 Makefile 啟動指令會自動讀取它們，不需要在 `.env` 填寫 Telegram 憑證：
 
@@ -184,7 +184,7 @@ http://127.0.0.1:8765/mcp
 
 `send_file`、`download_media`、`upload_file` 與 `open_photo(save_path=...)` 會讀寫本機檔案。Stateless Streamable HTTP 無法向 MCP client 取得 Roots，因此 launchd 必須在啟動 server 時明確傳入 server-side roots；沒有 roots 時，這些工具會預設停用。
 
-`scripts/setup.sh` 會建立並授權專用目錄：
+`make setup` 會建立並授權專用目錄：
 
 ```text
 ~/Downloads/telegram_mcp_files
@@ -195,10 +195,10 @@ http://127.0.0.1:8765/mcp
 `setup.sh` 也會偵測內嵌 telegram-mcp 的專案，或設定 `TELEGRAM_MCP_SUMMARY_PROJECT` 指向的專案根目錄；找到 `.claude/commands/telegram-summary.md` 時，自動建立並只授權該專案的 `docs/chat/`。因此 `$telegram-summary` 可以把照片保存到預期的 `<對話資料夾>/media/`，而不會取得整個 repository 的權限：
 
 ```bash
-TELEGRAM_MCP_SUMMARY_PROJECT="/absolute/path/to/project" bash scripts/setup.sh
+TELEGRAM_MCP_SUMMARY_PROJECT="/absolute/path/to/project" make setup
 ```
 
-> `TELEGRAM_MCP_SUMMARY_PROJECT` **只有 `scripts/setup.sh` 會讀，而且必須在命令列上傳入**。`setup.sh` 不會載入 `.env`，寫進 `.env` 不會有任何作用；server 端也不使用這個變數。指定的路徑若不存在或沒有 `.claude/commands/telegram-summary.md`，setup.sh 會靜默跳過、不影響其他安裝步驟。
+> `TELEGRAM_MCP_SUMMARY_PROJECT` **只有 `scripts/setup.sh`（`make setup`）會讀，而且必須在命令列上傳入**。`setup.sh` 不會載入 `.env`，寫進 `.env` 不會有任何作用；server 端也不使用這個變數。指定的路徑若不存在或沒有 `.claude/commands/telegram-summary.md`，setup.sh 會靜默跳過、不影響其他安裝步驟。
 
 若未設定，或專案位於其他位置，也可以手動只授權該專案的 `docs/chat/`：
 
@@ -221,27 +221,27 @@ Installer 設定會保存在 `~/Library/Application Support/telegram-mcp/allowed
 TELEGRAM_MCP_ALLOWED_ROOTS="" bash scripts/install-launchd.sh
 ```
 
-`TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1` 只會允許 fallback，不會建立或授權任何 root；單獨設定它無法啟用檔案工具。變更 roots 後請完全重啟 Claude Code／Codex，使 client 重新連線。
+`TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1` 只會允許 fallback，不會建立或授權任何 root；單獨設定它無法啟用檔案工具。變更 roots 後請完全重啟 Claude Code／Codex／Grok，使 client 重新連線。
 
 ---
 
 ## 步驟五：切換 MCP client 設定
 
-若你是執行 `bash scripts/setup.sh` 或 `bash scripts/install-launchd.sh`，script 會分別偵測 Claude Code 與 Codex，並把已安裝的 client 設為 Streamable HTTP。未安裝的 client 會被跳過，並顯示安裝後應執行的註冊命令；此步驟可用 `make config-check` 確認。
+若你是執行 `make setup` 或 `bash scripts/install-launchd.sh`，script 會分別偵測 Claude Code、Codex 與 Grok，並把已安裝的 client 設為 Streamable HTTP。未安裝的 client 會被跳過，並顯示安裝後應執行的註冊命令；此步驟可用 `make config-check` 確認。
 
 使用 Makefile 指令管理 MCP registration：
 
 ```bash
-# 檢查目前 Claude Code 與 Codex MCP 設定
+# 檢查目前 Claude Code、Codex 與 Grok MCP 設定
 make config-check
 
-# 兩個 client 都切到 Streamable HTTP
+# 已安裝的 client 都切到 Streamable HTTP
 make use-http
 
 # Claude Code 切到 legacy SSE（Codex 不支援 SSE）
 make use-sse
 
-# 兩個 client 都切回 stdio
+# 已安裝的 client 都切回 stdio
 make use-stdio
 ```
 
@@ -250,20 +250,22 @@ make use-stdio
 ```bash
 claude mcp add-json --scope user telegram-mcp '{"type":"http","url":"http://127.0.0.1:8765/mcp","headersHelper":"/path/to/telegram-mcp/scripts/mcp-auth-headers.sh"}'
 codex mcp add telegram-mcp --url http://127.0.0.1:8765/mcp --bearer-token-env-var TELEGRAM_MCP_TOKEN
+grok mcp add --scope user --transport http telegram-mcp http://127.0.0.1:8765/mcp --header 'Authorization: Bearer ${TELEGRAM_MCP_TOKEN}'
 ```
 
-Claude Code 用 `headersHelper` 於連線時從 Keychain 讀取 bearer token；Codex 使用 `TELEGRAM_MCP_TOKEN`。安裝腳本會將該 Keychain token 設到使用者 launchd 環境，因此重新啟動後的 Codex 可取得它，不會把 token 寫進設定檔。
+Claude Code 用 `headersHelper` 於連線時從 Keychain 讀取 bearer token；Codex 與 Grok 使用 `TELEGRAM_MCP_TOKEN`（Grok 把 `${TELEGRAM_MCP_TOKEN}` 寫進 header，連線時再展開）。安裝腳本會將該 Keychain token 設到使用者 launchd 環境，因此重新啟動後的 Codex／Grok 可取得它，不會把 token 寫進設定檔。
 
-`make use-stdio` 會把兩個 client 的 registration 改回由 client 啟動本專案：
+`make use-stdio` 會把已安裝 client 的 registration 改回由 client 啟動本專案：
 
 ```bash
 claude mcp add --scope user telegram-mcp -- "/path/to/telegram-mcp/scripts/start.sh" --transport stdio
 codex mcp add telegram-mcp -- "/path/to/telegram-mcp/scripts/start.sh" --transport stdio
+grok mcp add --scope user telegram-mcp -- "/path/to/telegram-mcp/scripts/start.sh" --transport stdio
 ```
 
-`make use-sse` 只會把 Claude Code 設為 legacy SSE，並使用 `scripts/mcp-auth-headers.sh` 從 Keychain 讀取 bearer token。現有 Codex CLI 原生只支援 Streamable HTTP URL 與 stdio，不能直接設定 SSE；切換 SSE 時 Codex 設定保持不變。
+`make use-sse` 只會把 Claude Code 設為 legacy SSE，並使用 `scripts/mcp-auth-headers.sh` 從 Keychain 讀取 bearer token。現有 Codex CLI 原生只支援 Streamable HTTP URL 與 stdio，不能直接設定 SSE；切換 SSE 時 Codex 與 Grok 設定保持不變。
 
-完全結束 Claude Code／Codex（**所有視窗**）後重新開啟即生效。
+完全結束 Claude Code／Codex／Grok（**所有視窗**）後重新開啟即生效。
 
 ---
 
@@ -271,17 +273,18 @@ codex mcp add telegram-mcp -- "/path/to/telegram-mcp/scripts/start.sh" --transpo
 
 ```bash
 make list          # 顯示所有指令
+make setup         # 一鍵安裝（憑證、Keychain、launchd、MCP client）
 make start         # 前景啟動 HTTP mode，同 make start-http
 make start-http    # 前景啟動 Streamable HTTP mode
 make start-sse     # 前景啟動 legacy SSE mode
 make start-stdio   # 前景啟動 stdio mode
 
-make health        # 一次檢查 launchd／HTTP server／Claude／Codex 四層狀態
+make health        # 一次檢查 launchd／HTTP server／Claude／Codex／Grok 五層狀態
 
-make config-check  # 顯示目前 Claude Code 與 Codex MCP 設定
-make use-http      # 兩個 client 切到 Streamable HTTP
-make use-sse       # Claude Code 切到 legacy SSE；Codex 維持原設定
-make use-stdio     # 兩個 client 切回 stdio
+make config-check  # 顯示目前 Claude Code、Codex 與 Grok MCP 設定
+make use-http      # 已安裝的 client 切到 Streamable HTTP
+make use-sse       # Claude Code 切到 legacy SSE；Codex 與 Grok 維持原設定
+make use-stdio     # 已安裝的 client 切回 stdio
 ```
 
 可覆寫變數：
@@ -479,12 +482,13 @@ claude mcp list
 make health
 ```
 
-會一次列出四層狀態，每層以 ✅／❌ 標示（不適用的層級標 ⏭️）：
+會一次列出五層狀態，每層以 ✅／❌ 標示（不適用的層級標 ⏭️）：
 
 1. **launchd** — 服務是否真的在執行（含 PID）。
 2. **server** — HTTP server 是否在監聽（`HTTP 401` 代表 server 正常且 bearer token 驗證有生效）。
 3. **claude** — Claude 的 MCP registration 是否連線成功（`claude mcp get` 會真的建立連線）。
 4. **codex** — Codex CLI 只會回報靜態設定（指向失效的 URL 也照樣顯示 `enabled`），因此這裡改為自行探測：取出 Codex 設定要讀的環境變數（`bearer_token_env_var`）中的 token，對 server 發出真正的 MCP `initialize` 請求。`200` 表示 Codex 這把 token 可以通過認證，`401` 表示 Codex 會被拒絕。token 不會出現在輸出中。
+5. **grok** — Grok 的 MCP registration 是否連線成功（`grok mcp doctor` 會真的建立連線）。Grok 展開 header 裡的 `${TELEGRAM_MCP_TOKEN}`，因此探測前會從環境變數或 launchd 補上同一把 token。
 
 此指令純唯讀、不會改動任何設定；全部正常時 exit code 為 0，可串接其他指令（`make health && ...`）。
 

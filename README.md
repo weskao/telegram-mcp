@@ -13,11 +13,13 @@
 
 > 📖 **初次設定？請直接照 [SETUP.md](SETUP.md) 逐步操作**，涵蓋 uv 安裝、Telegram API 憑證申請、產生 Session String、環境設定到掛載 Claude 的完整流程。
 
-回訪速查：一鍵安裝並登記到 Claude user scope（所有專案共用）。首次安裝會建立 `~/Downloads/telegram_mcp_files` 作為專用檔案交換目錄。
+回訪速查：在專案目錄執行 `make setup` 一鍵安裝並登記到 Claude user scope（所有專案共用）。首次安裝會建立 `~/Downloads/telegram_mcp_files` 作為專用檔案交換目錄。
 
 ```bash
-bash scripts/setup.sh
+make setup
 ```
+
+（等同 `bash scripts/setup.sh`。）
 
 服務管理、HTTP／stdio／SSE 切換、多帳號等指令見 **[SETUP.md § Makefile 指令](SETUP.md)**，或執行 `make list`。
 
@@ -49,8 +51,10 @@ TELEGRAM_MCP_ALLOWED_ROOTS="~/Downloads/telegram_mcp_files,<project_root>/docs/c
 
 ```bash
 bash scripts/install-launchd.sh
-launchctl kickstart -k "gui/$(id -u)/com.telegram-mcp.server"
+make restart
 ```
+
+`make restart` 會重啟 launchd 服務、等待 `.env` 的 `MCP_PORT`（未設定時為 8765）就緒，再跑 `make health`。
 
 完成後，`download_media` 未指定路徑時會使用 `~/Downloads/telegram_mcp_files/downloads/`；`telegram-summary` 的附件則保存於 `<project_root>/docs/chat/<對話名稱>/media/`。
 
@@ -62,7 +66,7 @@ launchctl kickstart -k "gui/$(id -u)/com.telegram-mcp.server"
 
 ### 🚀 一鍵安裝與常駐 HTTP 服務
 
-- `bash scripts/setup.sh`：一次安裝、將 bearer token 存入 Keychain、建立專用 allowed root `~/Downloads/telegram_mcp_files`，偵測內嵌 telegram-mcp 專案或 `TELEGRAM_MCP_SUMMARY_PROJECT` 後只額外授權其 `docs/chat/`，並把 Claude Code 與 Codex 設為連向同一個本機 HTTP server。
+- `make setup`（= `bash scripts/setup.sh`）：一次安裝、將 bearer token 存入 Keychain、建立專用 allowed root `~/Downloads/telegram_mcp_files`，偵測內嵌 telegram-mcp 專案或 `TELEGRAM_MCP_SUMMARY_PROJECT` 後只額外授權其 `docs/chat/`，並把 Claude Code、Codex 與 Grok 設為連向同一個本機 HTTP server。
 - `scripts/install-launchd.sh`：安裝 launchd 服務並開機自啟，讓 HTTP server 常駐。
 - launchd 用的 stateless streamable HTTP 傳輸無法向 client 發出 Roots 請求，因此檔案工具只能使用啟動時明確授權的 server roots；沒有 roots 時，`download_media`、`send_file` 等工具會安全停用。`TELEGRAM_MCP_ALLOWED_ROOTS="~/Downloads/telegram_mcp_files,<project_root>/docs/chat"` 可放在 `.env`，請將 `<project_root>` 替換成該電腦的實際絕對路徑；它會與 installer／CLI roots 合併。`TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1` 本身不會建立 root。`telegram-summary` 解析圖片時優先使用不落地的 `open_photo`，需要保存附件時使用授權的專案 `docs/chat/`。詳見 [SETUP.md 的 allowed roots 說明](SETUP.md#檔案交換目錄allowed-roots)。
 

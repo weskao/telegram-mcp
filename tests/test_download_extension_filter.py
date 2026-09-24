@@ -1,11 +1,12 @@
 """Tests for _check_download_extension safety filter in tools/media.py."""
 
+import mimetypes
 from pathlib import Path
 
 import pytest
 
 import main  # noqa: F401  ensures telegram_mcp.runtime loaded
-from telegram_mcp.tools.media import _check_download_extension
+from telegram_mcp.tools.media import _check_download_extension  # noqa: F401  registers text/x-web-markdown as a side effect of import
 
 
 @pytest.mark.parametrize(
@@ -137,3 +138,15 @@ def test_parse_ext_env_empty_string_falls_back(monkeypatch):
         "TELEGRAM_DOWNLOAD_ALLOWED_EXT", media._DEFAULT_DOWNLOAD_ALLOWED_EXT
     )
     assert parsed == media._DEFAULT_DOWNLOAD_ALLOWED_EXT
+
+
+def test_web_markdown_mime_resolves_to_md_extension():
+    # Regression for the .md document download bug: Telegram clients tag .md
+    # uploads with the non-standard "text/x-web-markdown" MIME type, which
+    # stdlib mimetypes doesn't know by default. Telethon derives the on-disk
+    # extension purely from this MIME type (see downloads.py
+    # _get_proper_filename), so an unresolved MIME means the file lands with
+    # no extension at all and _check_download_extension rejects it -- even
+    # though "md" is on the allowlist. Importing telegram_mcp.tools.media must
+    # register this mapping as a side effect.
+    assert mimetypes.guess_extension("text/x-web-markdown") == ".md"
