@@ -10,7 +10,7 @@
 #   - Stores all credentials in macOS Keychain
 #   - Configures a dedicated allowed root for local file tools
 #   - Installs and starts the launchd Streamable HTTP server
-#   - Registers each installed Claude Code / Codex / Grok / AGY client for authenticated Streamable HTTP
+#   - Registers each installed Claude Code / Codex / Grok / AGY / Copilot client for authenticated Streamable HTTP
 #
 # Required user input (interactive prompts):
 #   - Telegram API ID and API Hash (from https://my.telegram.org/apps)
@@ -21,6 +21,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+# MCP_CLIENTS and the spinner (mcp-client.sh sources spinner.sh).
+source "$SCRIPT_DIR/mcp-client.sh"
 
 _kc_get() { security find-generic-password -a "$USER" -s "$1" -w 2>/dev/null || true; }
 _kc_set() {
@@ -176,8 +178,8 @@ echo
 
 # ── Step 4: MCP clients ──────────────────────────────────────────────────────
 
-echo "步驟 4：確認已安裝的 Claude Code / Codex / Grok / AGY MCP 設定…"
-make -C "$PROJECT_DIR" config-check
+echo "步驟 4：確認已安裝的 Claude Code / Codex / Grok / AGY / Copilot MCP 設定…"
+make -C "$PROJECT_DIR" --no-print-directory config-check
 echo
 
 # Optional flag: clean up project-level telegram-mcp overrides
@@ -245,10 +247,12 @@ fi
 # 6b. port 是否真的在監聽（服務可能註冊成功卻不斷崩潰重啟）
 if [[ "$VERIFY_OK" == 1 ]]; then
   PORT_UP=0
+  spinner_start "  等待 Port $MCP_PORT 監聽（最多 20 秒）…"
   for _ in $(seq 1 40); do
     if nc -z "$MCP_HOST" "$MCP_PORT" 2>/dev/null; then PORT_UP=1; break; fi
     sleep 0.5
   done
+  spinner_stop
   if [[ "$PORT_UP" == 1 ]]; then
     echo "  ✅ Port $MCP_PORT 監聽中"
     LAUNCHD_LINE="$(launchctl list | awk '$3 == "com.telegram-mcp.server"' || true)"
@@ -349,13 +353,17 @@ if [[ "$VERIFY_OK" == 1 ]]; then
     echo
   fi
   echo "下一步："
-  if command -v claude &>/dev/null || command -v codex &>/dev/null || command -v grok &>/dev/null || command -v agy &>/dev/null; then
-    echo "  1. 完全結束已安裝的 Claude Code / Codex / Grok / AGY，再重新開啟（才會載入新設定與 token）"
+  ANY_CLIENT=0
+  for _client in "${MCP_CLIENTS[@]}"; do
+    command -v "$_client" &>/dev/null && ANY_CLIENT=1
+  done
+  if [[ "$ANY_CLIENT" == 1 ]]; then
+    echo "  1. 完全結束已安裝的 Claude Code / Codex / Grok / AGY / Copilot，再重新開啟（才會載入新設定與 token）"
     echo "  2. 在任一 client 中問「幫我查看我的 Telegram 帳號資訊」測試"
     echo "  3. 之後若無法連線：執行 'make health' 檢查；server 異常時執行 'make restart'"
   else
-    echo "  目前未偵測到 Claude Code、Codex、Grok 或 AGY CLI；server 已就緒，但尚無 client 註冊。"
-    echo "  安裝 client 後執行 'make use-http-claude'、'make use-http-codex'、'make use-http-grok' 或 'make use-http-agy'。"
+    echo "  目前未偵測到 Claude Code、Codex、Grok、AGY 或 Copilot CLI；server 已就緒，但尚無 client 註冊。"
+    echo "  安裝 client 後執行 'make use-http-<client>'（${MCP_CLIENTS[*]}），或 'make use-http' 一次設定全部。"
   fi
 else
   echo "=== 設定尚未完成 ==="

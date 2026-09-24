@@ -36,30 +36,41 @@ def source_resolve_token(var: str, extra_env: dict[str, str]) -> subprocess.Comp
     )
 
 
-@pytest.mark.parametrize(
-    "client,variable,follow_up",
-    [
-        ("claude", "CLAUDE", "make use-http-claude"),
-        ("codex", "CODEX", "make use-http-codex"),
-        ("grok", "GROK", "make use-http-grok"),
-    ],
-)
-def test_register_missing_cli_is_skipped_with_follow_up(client, variable, follow_up):
+CLIENTS = [("claude", "CLAUDE"), ("codex", "CODEX"), ("grok", "GROK"), ("agy", "AGY"), ("copilot", "COPILOT")]
+
+
+@pytest.mark.parametrize("client,variable", CLIENTS)
+def test_register_missing_cli_is_skipped_with_follow_up(client, variable):
     result = run_client("register", client, "http", extra_env={variable: "definitely-missing-mcp-cli"})
 
     assert result.returncode == 0
     assert "CLI not found" in result.stdout
-    assert follow_up in result.stdout
+    assert f"make use-http-{client}" in result.stdout
     assert "Registered" not in result.stdout
 
 
-@pytest.mark.parametrize("client,variable", [("claude", "CLAUDE"), ("codex", "CODEX"), ("grok", "GROK")])
+@pytest.mark.parametrize("client,variable", CLIENTS)
 def test_register_failure_is_not_reported_as_success(client, variable):
     result = run_client("register", client, "http", extra_env={variable: "false"})
 
     assert result.returncode != 0
     assert "Removing existing" in result.stdout
     assert "Registered 'telegram-mcp'" not in result.stdout
+
+
+def test_copilot_http_header_keeps_token_as_env_reference(tmp_path):
+    # A fake copilot that records its `mcp add` arguments.
+    log = tmp_path / "args"
+    copilot = tmp_path / "copilot"
+    copilot.write_text(f'#!/bin/sh\n[ "$2" = add ] && printf "%s\\n" "$@" > "{log}"\nexit 0\n')
+    copilot.chmod(copilot.stat().st_mode | stat.S_IEXEC)
+
+    result = run_client("register", "copilot", "http", extra_env={"COPILOT": str(copilot)})
+
+    assert result.returncode == 0
+    args = log.read_text().splitlines()
+    assert "Authorization: Bearer ${TELEGRAM_MCP_TOKEN}" in args
+    assert args[-2:] == ["telegram-mcp", "http://127.0.0.1:8765/mcp"]
 
 
 def test_resolve_token_prefers_process_env(tmp_path):
