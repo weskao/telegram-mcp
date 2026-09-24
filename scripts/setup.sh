@@ -327,16 +327,32 @@ if [[ "$VERIFY_OK" != 1 ]]; then
 fi
 echo
 
+# ── Step 7: Client health ─────────────────────────────────────────────────────
+# Step 6 only proves the server; `make health` also probes each client's own
+# registration. A client failure does not fail setup — the server is ready and
+# health prints the exact `make use-http-*` fix.
+
+HEALTH_OK=1
+if [[ "$VERIFY_OK" == 1 ]]; then
+  echo "步驟 7：檢查各 client 連線（make health）…"
+  make -C "$PROJECT_DIR" --no-print-directory health || HEALTH_OK=0
+  echo
+fi
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 
 if [[ "$VERIFY_OK" == 1 ]]; then
   echo "=== 設定完成 ==="
   echo
+  if [[ "$HEALTH_OK" != 1 ]]; then
+    echo "⚠️  部分 client 未通過健康檢查：依上方提示執行對應的 'make use-http-*'，再執行 'make health'"
+    echo
+  fi
   echo "下一步："
   if command -v claude &>/dev/null || command -v codex &>/dev/null || command -v grok &>/dev/null || command -v agy &>/dev/null; then
-    echo "  1. 完全結束已安裝的 Claude Code / Codex / Grok / AGY，再重新開啟"
-    echo "  2. 執行 'make config-check' 確認已安裝的 client 已載入 Streamable HTTP"
-    echo "  3. 在任一 client 中問「幫我查看我的 Telegram 帳號資訊」測試"
+    echo "  1. 完全結束已安裝的 Claude Code / Codex / Grok / AGY，再重新開啟（才會載入新設定與 token）"
+    echo "  2. 在任一 client 中問「幫我查看我的 Telegram 帳號資訊」測試"
+    echo "  3. 之後若無法連線：執行 'make health' 檢查；server 異常時執行 'make restart'"
   else
     echo "  目前未偵測到 Claude Code、Codex、Grok 或 AGY CLI；server 已就緒，但尚無 client 註冊。"
     echo "  安裝 client 後執行 'make use-http-claude'、'make use-http-codex'、'make use-http-grok' 或 'make use-http-agy'。"
