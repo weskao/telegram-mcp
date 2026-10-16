@@ -31,6 +31,8 @@ _kc_set() {
 }
 
 # ── UI ────────────────────────────────────────────────────────────────────────
+# zh-TW text and ▌›│ glyphs garble under LANG=C / Big5; force UTF-8 for this run.
+[[ "$(locale charmap 2>/dev/null)" == UTF-8 ]] || export LC_ALL=en_US.UTF-8
 # Color only on a TTY without NO_COLOR; symbols carry meaning without color.
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   _B=$'\033[1m' _D=$'\033[2m' _R=$'\033[0m'
@@ -52,7 +54,7 @@ _info() { printf '  %s•%s %s\n' "$_ACC" "$_R" "$*"; }
 _sub()  { printf '      %s%s%s\n' "$_D" "$*" "$_R"; }
 _cmd()  { printf '%s%s%s' "$_ACC" "$*" "$_R"; }
 # _ask <var> <question> [hint] — colored prompt on the same line as the input.
-_ask()  { printf '  %s?%s %s%s%s ' "$_ACC" "$_R" "$2" "${3:+ $_D$3$_R}" "$_D›$_R"; IFS= read -r "$1"; }
+_ask()  { printf '  %s?%s %s%s%s ' "$_ACC" "$_R" "$2" "${3:+ $_D$3$_R}" "${_D}›${_R}"; IFS= read -r "$1"; }
 # Frame a sub-script's stdout in a dim gutter; -l keeps BSD sed line-buffered.
 _gutter() { sed -l "s/^/  ${_D}│${_R} /"; }
 
