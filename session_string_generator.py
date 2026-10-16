@@ -52,8 +52,7 @@ def _store_in_keychain(service: str, value: str) -> bool:
     account = os.getenv("USER") or ""
     try:
         subprocess.run(
-            ["security", "add-generic-password", "-U",
-             "-a", account, "-s", service, "-w", value],
+            ["security", "add-generic-password", "-U", "-a", account, "-s", service, "-w", value],
             check=True,
             capture_output=True,
         )
@@ -74,8 +73,7 @@ def _register_session_label(label: str) -> None:
     label = label.lower()
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-a", account,
-             "-s", index_service, "-w"],
+            ["security", "find-generic-password", "-a", account, "-s", index_service, "-w"],
             capture_output=True,
             text=True,
         )
@@ -93,7 +91,9 @@ def _update_env_file(env_var: str, session_string: str) -> None:
     """Write ``env_var=session_string`` into the local .env file."""
     try:
         try:
-            with open(".env", "r") as file:
+            # python-dotenv reads .env as UTF-8; the locale default
+            # (cp1252, cp1251, cp936 on Windows) can't decode it.
+            with open(".env", "r", encoding="utf-8") as file:
                 env_contents = file.readlines()
         except FileNotFoundError:
             env_contents = []
@@ -105,7 +105,7 @@ def _update_env_file(env_var: str, session_string: str) -> None:
         else:
             env_contents.append(f"{env_var}={session_string}\n")
 
-        with open(".env", "w") as file:
+        with open(".env", "w", encoding="utf-8") as file:
             file.writelines(env_contents)
 
         print("\n.env file updated successfully!")
@@ -231,8 +231,7 @@ def _qr_login(client: TelegramClient) -> None:
 
 def _phone_login(client: TelegramClient) -> None:
     phone = input(
-        "Please enter your phone with country code (e.g. +886912345678), "
-        "or a bot token: "
+        "Please enter your phone with country code (e.g. +886912345678), " "or a bot token: "
     )
 
     try:
@@ -331,9 +330,7 @@ def main() -> None:
         print("\nIMPORTANT: Keep this string private and never share it with anyone!")
 
         try:
-            choice = input(
-                "\nStore this session string in the macOS Keychain? (y/N): "
-            )
+            choice = input("\nStore this session string in the macOS Keychain? (y/N): ")
         except EOFError:
             choice = "n"
         if choice.lower() == "y":

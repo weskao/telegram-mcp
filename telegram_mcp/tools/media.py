@@ -1,10 +1,13 @@
 """Media MCP tools."""
 
 import mimetypes
+import io
 import os
 import shutil
 import tempfile
 from uuid import uuid4
+
+from pypdf import PdfReader
 
 from telegram_mcp.runtime import *
 
@@ -228,11 +231,11 @@ class _DownloadLimitExceeded(Exception):
 async def send_file(
     chat_id: Union[int, str],
     file_path: Union[str, List[str]],
-    caption: str = None,
+    caption: Optional[str] = None,
     topic_id: Optional[int] = None,
     schedule_date: Union[str, int, None] = None,
     ctx: Optional[Context] = None,
-    account: str = None,
+    account: Optional[str] = None,
 ) -> str:
     """
     Send a file to a chat.
@@ -352,11 +355,11 @@ async def _send_album(
 async def send_album(
     chat_id: Union[int, str],
     file_paths: List[str],
-    caption: str = None,
+    caption: Optional[str] = None,
     topic_id: Optional[int] = None,
     schedule_date: Union[str, int, None] = None,
     ctx: Optional[Context] = None,
-    account: str = None,
+    account: Optional[str] = None,
 ) -> str:
     """
     Send multiple photos/videos as one Telegram media group (album).
@@ -405,7 +408,7 @@ async def download_media(
     message_id: int,
     file_path: Optional[str] = None,
     ctx: Optional[Context] = None,
-    account: str = None,
+    account: Optional[str] = None,
 ) -> str:
     """
     Download media from a message in a chat.
@@ -413,7 +416,8 @@ async def download_media(
         chat_id: The chat ID or username.
         message_id: The message ID containing the media.
         file_path: Optional absolute or relative path under allowed roots.
-            If omitted, saves into `<first_root>/downloads/`.
+            If omitted, saves into `<first_root>/downloads/` (or directly into
+            `<first_root>/` if the root is already a downloads directory).
     """
     try:
         cl = get_client(account)
@@ -506,7 +510,7 @@ async def send_voice(
     file_path: str,
     topic_id: Optional[int] = None,
     ctx: Optional[Context] = None,
-    account: str = None,
+    account: Optional[str] = None,
 ) -> str:
     """
     Send a voice message to a chat. File must be an OGG/OPUS voice note.
@@ -557,7 +561,9 @@ async def send_voice(
     annotations=ToolAnnotations(title="Upload File", openWorldHint=True, destructiveHint=True)
 )
 @with_account(readonly=False)
-async def upload_file(file_path: str, ctx: Optional[Context] = None, account: str = None) -> str:
+async def upload_file(
+    file_path: str, ctx: Optional[Context] = None, account: Optional[str] = None
+) -> str:
     """
     Upload a local file to Telegram and return upload metadata.
 
@@ -592,7 +598,9 @@ async def upload_file(file_path: str, ctx: Optional[Context] = None, account: st
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_media_info(chat_id: Union[int, str], message_id: int, account: str = None) -> str:
+async def get_media_info(
+    chat_id: Union[int, str], message_id: int, account: Optional[str] = None
+) -> str:
     """
     Get info about media in a message.
 
@@ -617,7 +625,7 @@ async def get_media_info(chat_id: Union[int, str], message_id: int, account: str
     annotations=ToolAnnotations(title="Get Sticker Sets", openWorldHint=True, readOnlyHint=True)
 )
 @with_account(readonly=True)
-async def get_sticker_sets(account: str = None) -> str:
+async def get_sticker_sets(account: Optional[str] = None) -> str:
     """
     Get all sticker sets.
 
@@ -642,7 +650,7 @@ async def send_sticker(
     file_path: str,
     topic_id: Optional[int] = None,
     ctx: Optional[Context] = None,
-    account: str = None,
+    account: Optional[str] = None,
 ) -> str:
     """
     Send a sticker to a chat. File must be a valid .webp sticker file.
@@ -682,7 +690,7 @@ async def send_sticker(
     annotations=ToolAnnotations(title="Get Gif Search", openWorldHint=True, readOnlyHint=True)
 )
 @with_account(readonly=True)
-async def get_gif_search(query: str, limit: int = 10, account: str = None) -> str:
+async def get_gif_search(query: str, limit: int = 10, account: Optional[str] = None) -> str:
     """
     Search for GIFs by query. Returns a list of Telegram document IDs (not file paths).
 
@@ -744,7 +752,7 @@ async def send_gif(
     chat_id: Union[int, str],
     gif_id: int,
     topic_id: Optional[int] = None,
-    account: str = None,
+    account: Optional[str] = None,
 ) -> str:
     """
     Send a GIF to a chat by Telegram GIF document ID (not a file path).
@@ -777,7 +785,7 @@ async def list_photos(
     chat_id: Union[int, str],
     source: str = AVATAR_SOURCE,
     limit: int = 20,
-    account: str = None,
+    account: Optional[str] = None,
 ) -> str:
     """
     Index the photos of any peer as text, without transferring any image.
@@ -836,7 +844,7 @@ async def open_photo(
     message_id: Optional[int] = None,
     save_path: Optional[str] = None,
     ctx: Optional[Context] = None,
-    account: str = None,
+    account: Optional[str] = None,
 ):
     """
     View one photo of any peer at full resolution.
@@ -896,7 +904,7 @@ async def get_photo_sheet(
     source: str = AVATAR_SOURCE,
     limit: int = 6,
     columns: Optional[int] = None,
-    account: str = None,
+    account: Optional[str] = None,
 ):
     """
     View many photos of a peer as one labelled collage, for a single image cost.
@@ -955,6 +963,114 @@ async def get_photo_sheet(
         )
 
 
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Inspect Document",
+        openWorldHint=True,
+        readOnlyHint=True,
+    )
+)
+@with_account(readonly=True)
+@validate_id("chat_id")
+async def inspect_document(
+    chat_id: Union[int, str],
+    message_id: int,
+    account: Optional[str] = None,
+):
+    """
+    Inspect and read the contents of a document, PDF, or image from a Telegram message
+    entirely in memory (no disk footprint).
+
+    Returns extracted text for PDFs and documents, or an Image for scans/photos
+    to allow instant visual verification in Claude.
+
+    Args:
+        chat_id: The chat ID, username, or alias.
+        message_id: The ID of the message containing the document or media.
+    """
+    try:
+        cl = get_client(account)
+        entity = await resolve_entity(chat_id, cl)
+        msg = await cl.get_messages(entity, ids=message_id)
+
+        if not msg or not msg.media:
+            return "There is no attached document or media file in the specified message."
+
+        # Downloading the file strictly into memory (bytes)
+        data = await cl.download_media(msg, file=bytes, progress_callback=note_tool_progress)
+        if not data:
+            return "Failed to read the contents of the document."
+
+        filename = getattr(msg.file, "name", "") or ""
+        mime_type = getattr(msg.file, "mime_type", "") or ""
+        ext = Path(filename).suffix.lower()
+
+        # 1. If this is an image or scan
+        if mime_type.startswith("image/") or ext in {".jpg", ".jpeg", ".png", ".webp"}:
+            fmt = (
+                "png"
+                if (ext == ".png" or mime_type == "image/png")
+                else ("webp" if (ext == ".webp" or mime_type == "image/webp") else "jpeg")
+            )
+            return Image(data=data, format=fmt)
+
+        # 2. If this is a PDF
+        if mime_type == "application/pdf" or ext == ".pdf":
+            try:
+                reader = PdfReader(io.BytesIO(data))
+                del data
+                text_pages = []
+                has_any_text = False
+                for i, page in enumerate(reader.pages):
+                    extracted = (page.extract_text() or "").strip()
+                    if extracted:
+                        has_any_text = True
+                    text_pages.append(f"--- Page {i + 1} ---\n{extracted}")
+
+                if not has_any_text:
+                    return (
+                        f"Document '{filename}' ({len(reader.pages)} pages) "
+                        "does not contain a text layer (possibly a scanned image without OCR)."
+                    )
+                full_text = "\n\n".join(text_pages).strip()
+                return f"Contents of document '{filename}' ({len(reader.pages)} pages):\n\n{full_text}"
+            except Exception as err:
+                return log_and_format_error(
+                    "inspect_document",
+                    err,
+                    user_message="Error reading PDF.",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
+
+        # 3. If this is a text file (TXT, CSV, JSON, MD, LOG, etc.)
+        if mime_type.startswith("text/") or ext in {
+            ".txt",
+            ".csv",
+            ".json",
+            ".md",
+            ".log",
+            ".yaml",
+            ".yml",
+            ".xml",
+            ".html",
+        }:
+            try:
+                text_content = data.decode("utf-8")
+            except UnicodeDecodeError:
+                text_content = data.decode("latin-1", errors="replace")
+            del data
+            return text_content
+
+        del data
+        return (
+            f"File format '{filename}' ({mime_type}) "
+            "is not currently supported for direct text analysis."
+        )
+    except Exception as e:
+        return log_and_format_error("inspect_document", e, chat_id=chat_id, message_id=message_id)
+
+
 __all__ = [
     "send_file",
     "send_album",
@@ -969,4 +1085,5 @@ __all__ = [
     "send_sticker",
     "get_gif_search",
     "send_gif",
+    "inspect_document",
 ]

@@ -22,13 +22,14 @@ from contextlib import contextmanager
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import List, Dict, Optional, Union, Any, Iterable, get_args
+from typing import List, Dict, NamedTuple, Optional, Union, Any, Iterable, get_args
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 # Third-party libraries
 from dotenv import find_dotenv, load_dotenv
 from mcp.server.fastmcp import FastMCP, Context, Image
+from mcp.server.fastmcp.exceptions import ToolError
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from mcp.types import Annotations, ImageContent, TextContent, ToolAnnotations
@@ -161,6 +162,11 @@ load_dotenv()
 
 TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID"))
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+
+# Install protocol compatibility for MCP 2026-07-28 and backwards compatibility
+from telegram_mcp.transport import install_protocol_compatibility
+
+install_protocol_compatibility()
 
 # The shared HTTP service can be consumed by long-lived MCP clients. Stateless requests keep
 # those clients usable across server-process restarts instead of rejecting their next call
@@ -473,74 +479,194 @@ _install_annotation_hook()
 
 _EXPOSED_TOOLS_MODES = {"all", "read-only"}
 _EXPOSED_TOOLS_ALLOW_SEPARATOR = "+"
+_EXPOSED_TOOLS_EXCLUDE_SEPARATOR = "-"
+_EXPOSED_TOOLS_HYPHEN_HINT = (
+    f" Tool names use underscores; '{_EXPOSED_TOOLS_EXCLUDE_SEPARATOR}' starts the "
+    "exclusion list."
+)
 
 
-def _split_exposed_tools_mode(mode: str) -> tuple[str, list[str]]:
-    """Split a normalised exposure mode into its base mode and write allowlist."""
-    base, separator, raw_allowlist = mode.partition(_EXPOSED_TOOLS_ALLOW_SEPARATOR)
-    if not separator:
-        return base, []
-    return base, [name.strip() for name in raw_allowlist.split(",") if name.strip()]
+class _ExposedToolsMode(NamedTuple):
+    """A validated ``TELEGRAM_EXPOSED_TOOLS`` value."""
+
+    base: str
+    allowlist: list[str]
+    exclusions: list[str]
+
+    def __str__(self) -> str:
+        normalised = self.base
+        if self.allowlist:
+            normalised += _EXPOSED_TOOLS_ALLOW_SEPARATOR + ",".join(self.allowlist)
+        if self.exclusions:
+            normalised += _EXPOSED_TOOLS_EXCLUDE_SEPARATOR + ",".join(self.exclusions)
+        return normalised
 
 
-def _get_exposed_tools_mode(value: Optional[str] = None) -> str:
-    """Return the configured MCP tool exposure mode.
+class _ExposedToolsResult(NamedTuple):
+    """Tools removed by the base mode (``hidden``) and by the ``-`` list (``excluded``)."""
 
-    ``TELEGRAM_EXPOSED_TOOLS=read-only`` keeps only tools annotated with
-    ``readOnlyHint=True``. ``read-only+send_message,reply_to_message`` keeps
-    those plus the named write tools. The default is ``all`` for backward
-    compatibility.
+    hidden: list[str]
+    excluded: list[str]
+
+
+def _split_tool_list(raw: Optional[str]) -> Optional[list[str]]:
+    """Split a comma-separated tool list; ``None`` means the separator was absent."""
+    if raw is None:
+        return None
+    return [name.strip() for name in raw.split(",") if name.strip()]
+
+
+def _split_exposed_tools_value(
+    mode: str,
+) -> tuple[Optional[str], Optional[list[str]], Optional[list[str]]]:
+    """Split a lowercased value into base mode, ``+`` allowlist and ``-`` exclusions.
+
+    The base is matched as a known-mode prefix rather than by splitting on
+    ``-``, because ``read-only`` itself contains one. Tool names use
+    underscores, so a ``-`` after the base always starts the exclusion list.
+    A ``None`` base means no known mode matched; a ``None`` list means its
+    separator was absent.
+    """
+    for base in sorted(_EXPOSED_TOOLS_MODES, key=len, reverse=True):
+        rest = mode[len(base) :]
+        if mode.startswith(base) and rest[:1] in (
+            "",
+            _EXPOSED_TOOLS_ALLOW_SEPARATOR,
+            _EXPOSED_TOOLS_EXCLUDE_SEPARATOR,
+        ):
+            break
+    else:
+        return None, None, None
+
+    raw_allowlist: Optional[str] = None
+    raw_exclusions: Optional[str] = None
+    if rest.startswith(_EXPOSED_TOOLS_ALLOW_SEPARATOR):
+        raw_allowlist, separator, tail = rest[1:].partition(_EXPOSED_TOOLS_EXCLUDE_SEPARATOR)
+        if separator:
+            raw_exclusions = tail
+    elif rest.startswith(_EXPOSED_TOOLS_EXCLUDE_SEPARATOR):
+        raw_exclusions = rest[1:]
+    return base, _split_tool_list(raw_allowlist), _split_tool_list(raw_exclusions)
+
+
+def _parse_exposed_tools_mode(value: Optional[str] = None) -> _ExposedToolsMode:
+    """Parse and validate ``TELEGRAM_EXPOSED_TOOLS`` (or ``value``).
+
+    ``read-only`` keeps only tools annotated with ``readOnlyHint=True``.
+    ``read-only+send_message,reply_to_message`` keeps those plus the named
+    write tools. A trailing ``-tool,tool`` list hides named tools from either
+    base, e.g. ``all-delete_chat_history``. The default is ``all`` for
+    backward compatibility. Tool names are checked against the registry
+    later, in ``_apply_exposed_tools_mode``.
     """
     raw_value = os.getenv("TELEGRAM_EXPOSED_TOOLS", "all") if value is None else value
-    mode = raw_value.strip().lower()
-    base_mode, allowlist = _split_exposed_tools_mode(mode)
-    if base_mode not in _EXPOSED_TOOLS_MODES:
+    base_mode, allowlist, exclusions = _split_exposed_tools_value(raw_value.strip().lower())
+    invalid = f"Invalid TELEGRAM_EXPOSED_TOOLS '{raw_value}'."
+    if base_mode is None:
         accepted = ", ".join(sorted(_EXPOSED_TOOLS_MODES))
+        raise SystemExit(f"{invalid} Expected one of: {accepted}.")
+    if allowlist is not None and base_mode != "read-only":
         raise SystemExit(
-            f"Invalid TELEGRAM_EXPOSED_TOOLS '{raw_value}'. Expected one of: {accepted}."
-        )
-    if _EXPOSED_TOOLS_ALLOW_SEPARATOR not in mode:
-        return base_mode
-    if base_mode != "read-only":
-        raise SystemExit(
-            f"Invalid TELEGRAM_EXPOSED_TOOLS '{raw_value}'. The "
+            f"{invalid} The "
             f"'{_EXPOSED_TOOLS_ALLOW_SEPARATOR}tool,tool' allowlist is only valid "
             "with read-only."
         )
-    if not allowlist:
+    if allowlist is not None and not allowlist:
         raise SystemExit(
-            f"Invalid TELEGRAM_EXPOSED_TOOLS '{raw_value}'. The "
+            f"{invalid} The "
             f"'{_EXPOSED_TOOLS_ALLOW_SEPARATOR}' allowlist must name at least one tool."
         )
-    return f"{base_mode}{_EXPOSED_TOOLS_ALLOW_SEPARATOR}{','.join(allowlist)}"
+    if exclusions is not None:
+        _validate_exposed_tools_exclusions(invalid, allowlist or [], exclusions)
+    return _ExposedToolsMode(base_mode, allowlist or [], exclusions or [])
 
 
-def _apply_exposed_tools_mode(server: FastMCP = mcp, mode: Optional[str] = None) -> list[str]:
-    """Prune registered MCP tools according to the configured exposure mode."""
-    selected_mode = _get_exposed_tools_mode() if mode is None else _get_exposed_tools_mode(mode)
-    base_mode, allowlist = _split_exposed_tools_mode(selected_mode)
-    if base_mode == "all":
-        return []
+def _get_exposed_tools_mode(value: Optional[str] = None) -> str:
+    """Return the configured MCP tool exposure mode, normalised."""
+    return str(_parse_exposed_tools_mode(value))
 
-    registered = {tool.name for tool in server._tool_manager.list_tools()}
-    unknown = sorted(set(allowlist) - registered)
-    if unknown:
-        # Fail loudly: a typo must not silently degrade into a narrower allowlist
-        # that looks like it worked.
+
+def _validate_exposed_tools_exclusions(
+    invalid: str, allowlist: list[str], exclusions: list[str]
+) -> None:
+    """Reject syntax mistakes in the ``-`` exclusion list."""
+    sep = _EXPOSED_TOOLS_EXCLUDE_SEPARATOR
+    if not exclusions:
+        raise SystemExit(f"{invalid} The '{sep}' exclusion list must name at least one tool.")
+    if any(_EXPOSED_TOOLS_ALLOW_SEPARATOR in name or sep in name for name in exclusions):
         raise SystemExit(
-            f"Invalid TELEGRAM_EXPOSED_TOOLS allowlist: unknown tool(s) {', '.join(unknown)}."
+            f"{invalid} Use one '{_EXPOSED_TOOLS_ALLOW_SEPARATOR}' list followed by one "
+            f"'{sep}' list, each comma-separated."
+        )
+    conflicting = sorted(set(allowlist) & set(exclusions))
+    if conflicting:
+        raise SystemExit(
+            f"{invalid} Tool(s) both exposed with '{_EXPOSED_TOOLS_ALLOW_SEPARATOR}' and "
+            f"excluded with '{sep}': {', '.join(conflicting)}."
         )
 
-    allowed = set(allowlist)
-    removed: list[str] = []
-    for tool in list(server._tool_manager.list_tools()):
-        if tool.name in allowed:
+
+def _reject_unknown_exposed_tools(
+    kind: str, names: list[str], registered: set[str], hint: str = ""
+) -> None:
+    unknown = sorted(set(names) - registered)
+    if unknown:
+        # Fail loudly: a typo must not silently produce a different surface
+        # that looks like it worked.
+        raise SystemExit(
+            f"Invalid TELEGRAM_EXPOSED_TOOLS {kind}: unknown tool(s) "
+            f"{', '.join(unknown)}.{hint}"
+        )
+
+
+def _apply_exposed_tools_mode(
+    server: FastMCP = mcp, mode: Optional[str] = None
+) -> _ExposedToolsResult:
+    """Prune registered MCP tools according to the configured exposure mode."""
+    selected = _parse_exposed_tools_mode(mode)
+    if selected.base == "all" and not selected.exclusions:
+        return _ExposedToolsResult([], [])
+
+    tools = list(server._tool_manager.list_tools())
+    registered = {tool.name for tool in tools}
+    # "read-only+send-message" splits into "+send" and "-message"; point at the
+    # hyphen when a "-" list could be the result of one.
+    hint = _EXPOSED_TOOLS_HYPHEN_HINT if selected.exclusions else ""
+    _reject_unknown_exposed_tools("allowlist", selected.allowlist, registered, hint)
+    _reject_unknown_exposed_tools("exclusion list", selected.exclusions, registered)
+
+    allowed = set(selected.allowlist)
+    excluded = set(selected.exclusions)
+
+    def base_exposes(tool) -> bool:
+        if selected.base == "all" or tool.name in allowed:
+            return True
+        return bool(getattr(getattr(tool, "annotations", None), "readOnlyHint", False))
+
+    already_hidden = sorted(
+        tool.name for tool in tools if tool.name in excluded and not base_exposes(tool)
+    )
+    if already_hidden:
+        # A no-op exclusion usually means the operator expected a different base,
+        # or typed "-" for "_" inside a "+" name.
+        verb, pronoun = ("is", "it") if len(already_hidden) == 1 else ("are", "them")
+        raise SystemExit(
+            f"Invalid TELEGRAM_EXPOSED_TOOLS exclusion list: {', '.join(already_hidden)} "
+            f"{verb} already hidden by {selected.base}; remove {pronoun} from the "
+            f"'{_EXPOSED_TOOLS_EXCLUDE_SEPARATOR}' list."
+            f"{_EXPOSED_TOOLS_HYPHEN_HINT if selected.allowlist else ''}"
+        )
+
+    result = _ExposedToolsResult([], [])
+    for tool in tools:
+        if tool.name in excluded:
+            result.excluded.append(tool.name)
+        elif not base_exposes(tool):
+            result.hidden.append(tool.name)
+        else:
             continue
-        annotations = getattr(tool, "annotations", None)
-        if not getattr(annotations, "readOnlyHint", False):
-            server._tool_manager.remove_tool(tool.name)
-            removed.append(tool.name)
-    return removed
+        server._tool_manager.remove_tool(tool.name)
+    return result
 
 
 _FILE_EXTENSION_TOKEN_PATTERN = re.compile(r"^\.[A-Za-z0-9_-]+$")
@@ -995,6 +1121,8 @@ def with_account(readonly=False):
     - In multi-mode with explicit account: uses that account's client.
     - In multi-mode without account + readonly: fans out to all accounts
       concurrently, prefixes each result with [label], concatenates.
+      ToolError failures are labelled alongside successful results; if every
+      account raises ToolError, the combined failure is raised instead.
     - In multi-mode without account + NOT readonly: returns an error.
 
     The wrapped function must accept ``account: str = None`` and use
@@ -1019,14 +1147,24 @@ def with_account(readonly=False):
             async def _call_for(label):
                 kw = dict(kwargs)
                 kw["account"] = label
-                return label, await fn(*args, **kw)
+                try:
+                    result = await fn(*args, **kw)
+                    failed = False
+                except ToolError as error:
+                    result = str(error)
+                    failed = True
+                return label, result, failed
 
             results = await asyncio.gather(*(_call_for(label) for label in clients))
-            if all(isinstance(result, str) for _, result in results):
-                return "\n\n".join(f"[{label}]\n{result}" for label, result in results)
+            if all(failed for _, _, failed in results):
+                raise ToolError(
+                    "\n\n".join(f"[{label}]\n{result}" for label, result, _ in results)
+                )
+            if all(isinstance(result, str) for _, result, _ in results):
+                return "\n\n".join(f"[{label}]\n{result}" for label, result, _ in results)
 
             account_labelled_content = []
-            for label, result in results:
+            for label, result, _ in results:
                 account_labelled_content.append(f"[{label}]")
                 account_labelled_content.extend(result if isinstance(result, list) else [result])
             return account_labelled_content
@@ -1037,7 +1175,7 @@ def with_account(readonly=False):
 
 
 _last_conn_verified: dict[int, float] = {}
-_reconnect_locks: dict[int, asyncio.Lock] = {}
+_conn_locks: dict[int, asyncio.Lock] = {}
 _CONN_VERIFY_INTERVAL: float = 30.0  # seconds between live pings
 _RECONNECT_TIMEOUT: float = 30.0  # seconds before a reconnect attempt is abandoned
 
@@ -1068,8 +1206,16 @@ async def _force_reconnect(cl: TelegramClient):
             f"Reconnecting to Telegram timed out after {_RECONNECT_TIMEOUT:.0f}s."
         ) from exc
     if not await cl.is_user_authorized():
-        reconnect_logger.warning("Client not authorized after reconnect, calling start()...")
-        await asyncio.wait_for(cl.start(), timeout=_RECONNECT_TIMEOUT)
+        # cl.start() would prompt via blocking input(): it stalls the event loop
+        # and, over stdio, reads protocol frames as a phone number.
+        try:
+            await cl.disconnect()
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Telegram session is not authorized after reconnect. Re-authorize it "
+            "outside the server (session_string_generator.py) and restart."
+        )
     _last_conn_verified[id(cl)] = time.time()
     reconnect_logger.warning("Forced reconnect successful")
 
@@ -1088,10 +1234,10 @@ async def ensure_connected(cl: TelegramClient = None):
         cl = get_client()
 
     key = id(cl)
-    if key not in _reconnect_locks:
-        _reconnect_locks[key] = asyncio.Lock()
 
-    async with _reconnect_locks[key]:
+    # Concurrent tool calls (e.g. several sessions on one HTTP server) must not
+    # reconnect the same client in parallel: one disconnect breaks another's connect.
+    async with _conn_locks.setdefault(key, asyncio.Lock()):
         if not cl.is_connected():
             await _force_reconnect(cl)
             return
@@ -1155,7 +1301,7 @@ except Exception:
 
 # File-path tool security configuration
 SERVER_ALLOWED_ROOTS: list[Path] = []
-DEFAULT_DOWNLOAD_SUBDIR = "downloads"
+DEFAULT_DOWNLOAD_SUBDIR = os.getenv("TELEGRAM_DOWNLOAD_SUBDIR", "downloads").strip()
 DISALLOWED_PATH_PATTERNS = ("*", "?", "[", "]", "{", "}", "~", "\x00")
 _DEFAULT_EXTENSION_ALLOWLISTS: dict[str, set[str]] = {
     "send_voice": {".ogg", ".opus"},
@@ -1163,6 +1309,7 @@ _DEFAULT_EXTENSION_ALLOWLISTS: dict[str, set[str]] = {
     "set_profile_photo": {".jpg", ".jpeg", ".png", ".webp"},
     "edit_chat_photo": {".jpg", ".jpeg", ".png", ".webp"},
     "export_unread_messages": {".json"},
+    "preview_custom_emoji": {".webp", ".png", ".jpg", ".jpeg", ".tgs", ".webm"},
 }
 # Mutable, TELEGRAM_FILE_EXTENSIONS-aware allowlist actually consulted by
 # _ensure_extension_allowed(). Rebuilt from _DEFAULT_EXTENSION_ALLOWLISTS by
@@ -1178,6 +1325,7 @@ MAX_FILE_BYTES: dict[str, int] = {
     "send_sticker": 10 * 1024 * 1024,
     "set_profile_photo": 50 * 1024 * 1024,
     "edit_chat_photo": 50 * 1024 * 1024,
+    "preview_custom_emoji": 20 * 1024 * 1024,
 }
 ROOTS_UNSUPPORTED_ERROR_CODES = {-32601}
 ROOTS_STATUS_READY = "ready"
@@ -1185,6 +1333,7 @@ ROOTS_STATUS_NOT_CONFIGURED = "not_configured"
 ROOTS_STATUS_UNSUPPORTED_FALLBACK = "unsupported_fallback"
 ROOTS_STATUS_CLIENT_DENY_ALL = "client_deny_all"
 ROOTS_STATUS_SERVER_FALLBACK = "server_fallback"
+ROOTS_STATUS_SERVER_ONLY = "server_only"
 ROOTS_STATUS_ERROR = "error"
 ROOTS_STATUS_TIMEOUT = "timeout"
 ROOTS_STATUS_TRANSPORT_FALLBACK = "transport_fallback"
@@ -1462,12 +1611,19 @@ def log_and_format_error(
     return f"An error occurred (code: {error_code})."
 
 
-def validate_id(*param_names_to_validate):
+def validate_id(*param_names_to_validate, raise_errors=False):
     """
     Decorator to validate chat_id and user_id parameters, including lists of IDs.
     It checks for valid integer ranges, string representations of integers,
     and username formats.
+    Set raise_errors to surface validation/privacy failures as MCP tool errors;
+    other tools retain their existing return contract by default.
     """
+
+    def error_result(message):
+        if raise_errors:
+            raise ToolError(message)
+        return message
 
     def decorator(func):
         @wraps(func)
@@ -1524,24 +1680,28 @@ def validate_id(*param_names_to_validate):
                     for item in param_value:
                         validated_item, error_msg = validate_single_id(item, param_name)
                         if error_msg:
-                            return log_and_format_error(
-                                func.__name__,
-                                ValidationError(error_msg),
-                                prefix="VALIDATION-001",
-                                user_message=error_msg,
-                                **{param_name: param_value},
+                            return error_result(
+                                log_and_format_error(
+                                    func.__name__,
+                                    ValidationError(error_msg),
+                                    prefix="VALIDATION-001",
+                                    user_message=error_msg,
+                                    **{param_name: param_value},
+                                )
                             )
                         validated_list.append(validated_item)
                     kwargs[param_name] = validated_list
                 else:
                     validated_value, error_msg = validate_single_id(param_value, param_name)
                     if error_msg:
-                        return log_and_format_error(
-                            func.__name__,
-                            ValidationError(error_msg),
-                            prefix="VALIDATION-001",
-                            user_message=error_msg,
-                            **{param_name: param_value},
+                        return error_result(
+                            log_and_format_error(
+                                func.__name__,
+                                ValidationError(error_msg),
+                                prefix="VALIDATION-001",
+                                user_message=error_msg,
+                                **{param_name: param_value},
+                            )
                         )
                     kwargs[param_name] = validated_value
 
@@ -1565,12 +1725,14 @@ def validate_id(*param_names_to_validate):
                                     pass
                             if not resolved_allowed:
                                 err = check_chat_access(item)
-                                return log_and_format_error(
-                                    func.__name__,
-                                    ChatAccessDeniedError(err),
-                                    prefix=ErrorCategory.PRIVACY,
-                                    user_message=err,
-                                    **{param_name: param_value},
+                                return error_result(
+                                    log_and_format_error(
+                                        func.__name__,
+                                        ChatAccessDeniedError(err),
+                                        prefix=ErrorCategory.PRIVACY,
+                                        user_message=err,
+                                        **{param_name: param_value},
+                                    )
                                 )
 
             return await func(*args, **kwargs)
@@ -2519,6 +2681,12 @@ def _client_roots_channel_unavailable() -> Optional[str]:
     return None
 
 
+def _server_roots_only_enabled(value: Optional[str] = None) -> bool:
+    """TELEGRAM_SERVER_ROOTS_ONLY: use server roots and skip roots/list (default off)."""
+    raw_value = os.getenv("TELEGRAM_SERVER_ROOTS_ONLY") if value is None else value
+    return _parse_bool_env(raw_value, False)
+
+
 def _roots_request_timeout(value: Optional[str] = None) -> Optional[float]:
     """Seconds to wait for the client's ``roots/list`` reply.
 
@@ -2543,6 +2711,8 @@ async def _get_effective_allowed_roots_with_status(
         if fallback_roots:
             return fallback_roots, ROOTS_STATUS_READY
         return [], ROOTS_STATUS_NOT_CONFIGURED
+    if fallback_roots and _server_roots_only_enabled():
+        return fallback_roots, ROOTS_STATUS_SERVER_ONLY
 
     unavailable_reason = _client_roots_channel_unavailable()
     if unavailable_reason:
@@ -2658,6 +2828,7 @@ async def _ensure_allowed_roots(
                 (
                     f"{tool_name} is disabled because the MCP client did not answer the "
                     "roots/list request. Configure server CLI roots and set "
+                    "TELEGRAM_SERVER_ROOTS_ONLY=1 (skip roots/list) or "
                     "TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1, or raise "
                     "TELEGRAM_ROOTS_TIMEOUT_SECONDS."
                 ),
@@ -2733,7 +2904,15 @@ async def _resolve_writable_file_path(
             candidate = _first_resolution_root(roots) / candidate
     else:
         safe_name = Path(default_filename).name
-        candidate = _first_resolution_root(roots) / DEFAULT_DOWNLOAD_SUBDIR / safe_name
+        first_root = _first_resolution_root(roots)
+        subdir = os.getenv("TELEGRAM_DOWNLOAD_SUBDIR", DEFAULT_DOWNLOAD_SUBDIR).strip()
+        if subdir and subdir != ".":
+            if first_root.name.lower() == subdir.lower():
+                candidate = first_root / safe_name
+            else:
+                candidate = first_root / subdir / safe_name
+        else:
+            candidate = first_root / safe_name
 
     candidate = candidate.resolve(strict=False)
     parent = candidate.parent.resolve(strict=False)

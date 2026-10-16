@@ -32,6 +32,7 @@ Message sent successfully:
 - [MCP Client Configuration](#mcp-client-configuration)
 - [Multi-Account Setup](#multi-account-setup)
 - [Device Identity](#device-identity)
+- [Expected Account Check](#expected-account-check)
 - [Proxy Support](#proxy-support)
 - [File Path Security](#file-path-security)
 - [Chat Access Privacy (Allowlist)](#chat-access-privacy-allowlist)
@@ -59,6 +60,14 @@ The server currently includes 80+ MCP tools grouped into these areas:
 - **Messages:** send, schedule, edit, delete, forward, pin, unpin, mark read, reply, search, inspect context, create polls, manage reactions, inspect inline buttons, and press inline callbacks. `send_message`, `reply_to_message`, and `edit_message` support classic formatting (`parse_mode='md'`/`'html'`) and server-side rich formatting (`parse_mode='rich'`/`'rich_markdown'`/`'rich_html'` — full Markdown/HTML with tables, headings, formulas, and collapsible sections). Rich modes require Telegram Premium on the account; Premium is re-checked on every call, and without it nothing is sent — the tool returns a structured `telegram_premium_required` result so the agent can reformat with classic modes and retry. `send_message`, `reply_to_message`, and `edit_message` also accept `format_date` to render a date as a tappable chip.
 
 `get_message_reactions` returns an empty list for a message with no reactions. To reuse a custom reaction, pass the returned `custom:<document_id>` value to `send_reaction`.
+
+`vote_poll(chat_id, message_id, option_indices, account=None)` votes in an existing poll.
+Read the poll with `get_messages` first, then select zero-based answer indices: `[0]`
+for the first answer, or `[0, 2]` for the first and third in a multiple-choice poll.
+This may replace an existing vote; empty selections, duplicate or out-of-range
+indices, closed polls, and multiple answers in single-choice polls are rejected.
+Telegram enforces voting permissions and restrictions on changing quiz votes.
+
 - **Contacts:** list, search, add, delete, block, unblock, import, export, inspect direct chats, find recent contact interactions, and remember contacts by the names you actually use (see below).
 
 ### Remembered contacts
@@ -94,6 +103,10 @@ The engine is chosen per call via the `engine` argument, or otherwise defaults t
 The cache lives in `TELEGRAM_TRANSCRIPT_CACHE_DIR` (default `data/transcripts`), written as a 700 directory / 600 file since it holds personal-chat text in plaintext — see [Docker](#docker) for why this needs its own volume mount in a container.
 - **Profile and privacy:** get your own account info, update profile fields, set or delete profile photos, inspect privacy settings, get user info/photos/status, and manage bot commands.
 - **Folders and drafts:** list, create, update, reorder, and delete Telegram folders; save, list, and clear drafts.
+  - `get_folder_limits` reports current Premium-aware folder, explicit-chat and pin limits from Telegram app config; unavailable limits are `null`.
+  - `get_folder_snapshot` captures folder definitions/order, including title entities, display fields, flags, stable peer IDs and ordered pins, without access hashes or chat contents. Its private-folder `definition` objects can be passed as restoration patches; shared invites and account/chat state are outside this snapshot's scope.
+  - `update_folder(folder_id, patch, expected_revision?)` edits an existing private folder in place, preserving omitted fields. Peer lists replace only the specified list; `[]` clears it. For example, `{"title": "Projects", "exclude_archived": false}` renames the folder and allows archived chats through its rules without unarchiving anything. Save a snapshot before editing and use its `revision` to reject stale plans. Shared/system folders are refused; avoid concurrent folder editors because Telegram has no atomic compare-and-swap.
+
 - **Events:** wait for incoming messages with debounce (`wait_for_new_message`, `wait_for_settled_message`), optionally for one chat only via `chat_id` — without it any unrelated conversation wakes the wait — or enable the opt-in incoming event feed for callback-style delivery (see below).
 
 All tool results that include Telegram user-controlled content are sanitized and, where practical, returned as structured JSON.
@@ -123,6 +136,18 @@ or `edit_message`, and insert `<tg-emoji emoji-id="ID">EMOJI</tg-emoji>` using i
 `id` and `emoji`. HTML-escape the fallback and other literal text. For example,
 the entry above becomes `<tg-emoji emoji-id="5368324170671202286">🍷</tg-emoji>`.
 Telegram's account restrictions still apply to sending custom emoji.
+
+For plain-text messages, pass the entries themselves as `custom_emojis` instead,
+with no HTML and no escaping; the text is sent verbatim. For example,
+`send_message(chat_id, "🍷 News for List<int> & co", custom_emojis=[{"emoji": "🍷",
+"id": "5368324170671202286"}])`. The same parameter works in `reply_to_message` and
+`edit_message`. Every standalone occurrence of each `emoji` becomes that custom
+emoji, including ones inside URLs or code; to keep one plain, use
+`parse_mode="html"` with `<tg-emoji>` instead. An emoji inside a longer sequence
+(such as 👍 in 👍🏽) is not a match. Nothing is sent when an `emoji` is not found or
+does not look like an emoji (pure ASCII/Latin punctuation such as `#` is refused),
+an `id` is not a positive 64-bit integer, two marked spans overlap, or `parse_mode`
+is set. It combines with `format_date`.
 
 ### Tappable dates and times
 
@@ -262,17 +287,33 @@ Every other write tool stays unregistered:
 TELEGRAM_EXPOSED_TOOLS=read-only+send_message,reply_to_message,send_file
 ```
 
-An unknown name in the allowlist aborts startup, so a typo cannot silently
-degrade into a narrower surface that looks like it worked.
+To hide specific tools instead, append `-` and a comma-separated list to either
+base. It works after a `+` list too:
+
+```env
+TELEGRAM_EXPOSED_TOOLS=all-delete_chat_history,delete_messages_bulk
+TELEGRAM_EXPOSED_TOOLS=read-only-get_participants
+TELEGRAM_EXPOSED_TOOLS=read-only+send_message,reply_to_message-get_participants
+```
+
+An unknown name in either list aborts startup, so a typo cannot silently
+produce a different surface that looks like it worked. Startup also aborts on
+an empty list, a name in both lists, or a `-` name the base already hides (such
+as `read-only-send_message`), which would be a no-op. To turn off voice
+transcription, set `TELEGRAM_TRANSCRIBE=off` rather than `-transcribe_voice`:
+hiding the tool leaves listings' pending-transcript hints and `auto` prefetch in
+place.
 
 At startup the server prints the names of the tools the mode hides to stderr;
-those are the names the `+` list accepts.
+those are the names the `+` list accepts. Tools hidden by the `-` list are
+printed on a separate line.
 
 This is an MCP tool-surface restriction, not a Telegram session sandbox or
 reduced Telegram account permission. The Telegram session string still has its
 normal authority inside the server process; read-only mode only prevents
 non-read-only tools from being registered and exposed through MCP. Accepted
-values are `all` (the default), `read-only`, and `read-only+<tool>,<tool>`.
+values are `all` (the default), `read-only`, and `read-only+<tool>,<tool>`,
+each optionally followed by `-<tool>,<tool>`.
 
 A separate, hardcoded allowlist restricts `send_voice`, `send_sticker`,
 `set_profile_photo`, and `edit_chat_photo` to their expected file extensions;
@@ -452,20 +493,12 @@ will use the server: a single long-lived process holds one Telegram
 connection, instead of every client spawning its own Telethon session —
 Telegram throttles and may flag accounts that open many parallel sessions.
 
-Every tool call also has a server-side ceiling of 55 seconds without progress,
-configured with `TELEGRAM_TOOL_TIMEOUT_SECONDS`. A timed-out Telegram request
-returns an explicit MCP error instead of leaving the client waiting
-indefinitely. The error says that completion is unknown: a write may already
-have succeeded, so check the destination before retrying. Set the value to `0`
-only for a deliberately unbounded operator session.
-
-File uploads and downloads restart that deadline on every transferred chunk, so
-a large file can take several minutes as long as it keeps moving. When the
-client sends a `progressToken`, the transfer is also reported as MCP progress
-notifications (at most once per second). The client must allow long calls: a
-client with its own fixed request timeout (often 60 seconds) that ignores
-progress can still cancel a long upload, or report a failure for a file that
-then arrives.
+Every tool call also has a server-side ceiling of 55 seconds, configured with
+`TELEGRAM_TOOL_TIMEOUT_SECONDS`. A timed-out Telegram request returns an explicit
+MCP error instead of leaving the client waiting indefinitely. The error says
+that completion is unknown: a write may already have succeeded, so check the
+destination before retrying. Set the value to `0` only for a deliberately
+unbounded operator session.
 
 Register the shared server with clients:
 
@@ -553,9 +586,8 @@ several MCP clients — you can let them share the session instead of pooling:
 TELEGRAM_SESSION_LOCK=shared
 ```
 
-Shared instances coexist with each other but never overlap an exclusive one
-(except on Windows, where a shared instance takes no lock). If you are not sure
-every client egresses from the same IP, use the pool.
+Shared instances coexist with each other but never overlap an exclusive one.
+If you are not sure every client egresses from the same IP, use the pool.
 
 ## Device Identity
 
@@ -574,6 +606,10 @@ would otherwise overwrite the name chosen during login on each reconnect, so
 set them to keep a stable, recognisable device name. The same variables are
 read both by the session string generator (at login) and by the server (on
 every connect), so set them in the same place as your other credentials.
+
+## Expected Account Check
+
+Set `TELEGRAM_EXPECTED_USERNAME` (or `TELEGRAM_EXPECTED_USERNAME_<LABEL>` per account) and the server refuses to start when the session belongs to a different account. The comparison is case-insensitive and ignores a leading `@`. Unset means no check.
 
 ## Proxy Support
 
@@ -650,10 +686,13 @@ Security behavior:
   `TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1` to fall back to the server CLI roots
   in that case (opt-in; the default stays deny-all). The same opt-in also applies
   when `list_roots` fails unexpectedly and no client paths could be recovered.
+- `roots/list` times out after `TELEGRAM_ROOTS_TIMEOUT_SECONDS` (default 10).
+  With server roots configured, `TELEGRAM_SERVER_ROOTS_ONLY=1` uses them directly
+  and skips `roots/list`; client Roots are then ignored.
 - Paths are resolved through real paths and must stay inside an allowed root.
 - Traversal, wildcard-like, shell-like, and null-byte path patterns are rejected.
 - Relative paths resolve under the first allowed root.
-- Downloads default to `<first_root>/downloads/`.
+- Downloads default to `<first_root>/downloads/` (or directly into `<first_root>/` if the root folder is already named `downloads` / `Downloads`). Configurable via `TELEGRAM_DOWNLOAD_SUBDIR`.
 - Size and extension limits are enforced for sensitive media tools. `send_file`
   and `upload_file` have no extension limit by default; see
   `TELEGRAM_FILE_EXTENSIONS` above to add one.
@@ -847,11 +886,13 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
   the MCP server when you can scan from an existing Telegram app, or
   `uv run session_string_generator.py --phone` when you need phone-code login.
   Then set `TELEGRAM_SESSION_STRING` in `.env`. The MCP server does not perform
-  interactive phone-code login over stdio.
+  interactive phone-code login over stdio, including after a reconnect: a session
+  terminated while the server runs fails with "not authorized after reconnect".
 - **Invalid API credentials:** verify `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` at [my.telegram.org/apps](https://my.telegram.org/apps).
 - **Database is locked:** make sure no other process is using the same file session.
 - **`AuthKeyDuplicatedError` / "Another telegram-mcp process is already connected with this session":** two processes tried to connect the same Telegram session at once (e.g. an MCP client restarted the connector before the old process exited), which Telegram rejects and can invalidate the session for both. The server now takes an exclusive lock per session before connecting; a second concurrent launch waits briefly (default 20s, override with `TELEGRAM_LOCK_GRACE_SECONDS`) for the first to release it and otherwise exits without ever calling `connect()`, instead of racing into a duplicate connection. Retry once only one instance is running — the refusal names the PID holding the lock. If several instances on this host are meant to share one session (all reaching Telegram from the same IP), set `TELEGRAM_SESSION_LOCK=shared`; see [Sharing one session from one host](#sharing-one-session-from-one-host).
 - **File tools are disabled:** pass allowed roots or configure MCP Roots in your client.
+- **File tools wait for `roots/list`:** configure server roots and set `TELEGRAM_SERVER_ROOTS_ONLY=1`.
 - **Path rejected:** ensure the path is inside an allowed root and does not use traversal or wildcard patterns.
 - **Auth errors after password changes:** regenerate your session string.
 - **Bot-only tool rejected:** regular user accounts cannot manage bot command settings.

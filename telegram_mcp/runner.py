@@ -67,6 +67,44 @@ def _session_lock_shared() -> bool:
     return raw == "shared"
 
 
+def _normalize_username(value) -> str:
+    return (value or "").strip().lstrip("@").casefold()
+
+
+def _expected_username(label: str) -> str:
+    """TELEGRAM_EXPECTED_USERNAME_<LABEL>, else TELEGRAM_EXPECTED_USERNAME; "" if unset."""
+    raw = os.getenv(f"TELEGRAM_EXPECTED_USERNAME_{label.upper()}") or os.getenv(
+        "TELEGRAM_EXPECTED_USERNAME"
+    )
+    return _normalize_username(raw)
+
+
+async def _verify_expected_username(label: str, client) -> None:
+    """Refuse to serve a session logged in to a different account."""
+    expected = _expected_username(label)
+    if not expected:
+        return
+
+    me = await client.get_me()
+    usernames = {_normalize_username(getattr(me, "username", None))}
+    for entry in getattr(me, "usernames", None) or []:
+        if getattr(entry, "active", False):
+            usernames.add(_normalize_username(getattr(entry, "username", None)))
+    usernames.discard("")
+
+    if expected in usernames:
+        return
+
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
+    raise RuntimeError(
+        f"Telegram client '{label}' is logged in to a different account than "
+        f"TELEGRAM_EXPECTED_USERNAME_{label.upper()} / TELEGRAM_EXPECTED_USERNAME expects."
+    )
+
+
 async def _connect_authorized_client(label, client) -> None:
     # First, prevent our own duplicate-spawn case outright: a per-session lock
     # means a second instance of this server never even attempts to connect
@@ -110,6 +148,7 @@ async def _connect_authorized_client(label, client) -> None:
             await asyncio.sleep(delay)
 
     if await client.is_user_authorized():
+        await _verify_expected_username(label, client)
         return
 
     raise RuntimeError(
@@ -289,13 +328,19 @@ def main() -> None:
     # exposure mode are complementary — apply both before serving.
     _runtime._apply_file_extension_overrides()
     _apply_tool_disable_list()
-    hidden = _runtime._apply_exposed_tools_mode()
+    hidden, excluded = _runtime._apply_exposed_tools_mode()
     if hidden:
         # These names are the menu for the "+" allowlist; without this line the
         # only way to find them is reading the tool annotations in the source.
         print(
             f"TELEGRAM_EXPOSED_TOOLS hides {len(hidden)} tool(s); list any of them "
             f"after '+' to expose it: {', '.join(sorted(hidden))}",
+            file=sys.stderr,
+        )
+    if excluded:
+        print(
+            f"TELEGRAM_EXPOSED_TOOLS excludes {len(excluded)} tool(s) listed "
+            f"after '-': {', '.join(sorted(excluded))}",
             file=sys.stderr,
         )
     _transcription.validate_transcription_config()
